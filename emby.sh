@@ -1,7 +1,6 @@
 #!/bin/bash
 # ========================================
-# Emby-Workers VPS 极简部署脚本 (V3.1)
-# 修复：Nginx 语法截断与换行符问题
+# Emby-Workers VPS 极简部署脚本 (V3.2)
 # ========================================
 
 set -e
@@ -31,10 +30,8 @@ install() {
     echo "1. 安装必要组件 (Nginx/Certbot)..."
     sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx
 
-    echo "2. 申请 SSL 证书 (Let's Encrypt)..."
-    # 检查证书是否存在
+    echo "2. 申请 SSL 证书..."
     if [[ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]]; then
-        echo "正在申请证书，请稍候..."
         sudo certbot certonly --nginx -d "$DOMAIN" --agree-tos --non-interactive --register-unsafely-without-email || true
     fi
 
@@ -46,34 +43,28 @@ install() {
         sudo curl -s "$REPO_RAW/emby-404.html" -o "$HTML_DIR/cyber-404.html"
     fi
 
-    echo "4. 从 GitHub 拉取并部署 Nginx 配置模板..."
-    # 关键修复：使用临时文件并强制追加换行符，防止 EOF 报错
-    TMP_CONF=$(mktemp)
-    curl -s "$REPO_RAW/emby.conf" | sed "s/{{DOMAIN}}/$DOMAIN/g" > "$TMP_CONF"
-    # 确保文件以大括号和换行符结尾
-    printf "\n" >> "$TMP_CONF"
+    echo "4. 从 GitHub 拉取并净化配置..."
+    # 核心修正：下载 -> 替换域名 -> 清理 Windows 换行符 -> 清理不可见字符 -> 确保末尾有换行
+    curl -s "$REPO_RAW/emby.conf" | \
+    sed "s/{{DOMAIN}}/$DOMAIN/g" | \
+    tr -d '\r' | \
+    sed 's/[[:space:]]*$//' > /tmp/emby_clean.conf
+    echo "" >> /tmp/emby_clean.conf
     
-    sudo mv "$TMP_CONF" "$CONF_TARGET"
-    sudo chown root:root "$CONF_TARGET"
-    sudo chmod 644 "$CONF_TARGET"
+    sudo mv /tmp/emby_clean.conf $CONF_TARGET
+    sudo rm -f /etc/nginx/sites-enabled/default || true
 
-    echo "5. 重启 Nginx 服务..."
-    # 先清理可能存在的默认配置冲突
-    if [[ -f "/etc/nginx/sites-enabled/default" ]]; then
-        sudo rm -f /etc/nginx/sites-enabled/default
-    fi
-
+    echo "5. 验证并重启 Nginx..."
     if sudo nginx -t; then
         sudo systemctl restart nginx
-        # 创建全局快捷命令
         sudo ln -sf "$(readlink -f "$0")" /usr/local/bin/emby
         sudo chmod +x /usr/local/bin/emby
-        echo -e "\n✅ 部署成功！"
-        echo "使用方式：https://$DOMAIN/目标服务器地址"
-        echo "例如：https://$DOMAIN/your-emby-server.com:8096"
+        echo -e "\n✅ 部署成功！域名: https://$DOMAIN"
     else
-        echo -e "\n❌ Nginx 配置校验失败！"
-        echo "请检查 /etc/nginx/conf.d/emby.conf 的末尾是否完整。"
+        echo -e "\n❌ 配置验证失败。内容预览如下："
+        cat -A $CONF_TARGET | head -n 5
+        echo "..."
+        cat -A $CONF_TARGET | tail -n 5
     fi
 }
 
@@ -88,7 +79,6 @@ uninstall() {
     fi
 }
 
-# --- 主程序 ---
 while true; do
     show_menu
     case $opt in
