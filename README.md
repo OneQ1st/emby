@@ -1,4 +1,5 @@
 ```
+apt update && apt install -y git
 cd /root && rm -rf emby && \
 git clone https://github.com/OneQ1st/emby.git && \
 cd emby && \
