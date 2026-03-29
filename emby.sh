@@ -1,12 +1,13 @@
 #!/bin/bash
 # ========================================
-# Emby-Workers VPS 极简部署脚本 (V3.2)
+# Emby-Workers VPS 极简部署脚本 (V3.4)
+# 修正：适配新项目地址 https://github.com/OneQ1st/emby
 # ========================================
 
 set -e
 
-# --- 核心配置 ---
-REPO_RAW="https://raw.githubusercontent.com/OneQ1st/emby-worker/main"
+# --- 核心配置 (已更新为新路径) ---
+REPO_RAW="https://raw.githubusercontent.com/OneQ1st/emby/main"
 CONF_TARGET="/etc/nginx/conf.d/emby.conf"
 HTML_DIR="/var/www/emby-404"
 WORKDIR=$(cd "$(dirname "$0")"; pwd)
@@ -37,34 +38,33 @@ install() {
 
     echo "3. 同步 404 页面资源..."
     sudo mkdir -p $HTML_DIR
-    if [[ -f "$WORKDIR/emby-404.html" ]]; then
-        sudo cp "$WORKDIR/emby-404.html" "$HTML_DIR/cyber-404.html"
+    # 尝试从新仓库拉取 404 页面
+    curl -s -f "$REPO_RAW/emby-404.html" -o "$HTML_DIR/cyber-404.html" || \
+    echo "<html><body><h1>404 Not Found</h1></body></html>" > "$HTML_DIR/cyber-404.html"
+
+    echo "4. 从 GitHub 拉取并部署 Nginx 配置..."
+    # 使用 -f 参数，如果 GitHub 返回 404，curl 会直接报错退出，不会写入文件
+    if curl -s -f "$REPO_RAW/emby.conf" -o /tmp/emby_raw.conf; then
+        # 替换域名占位符并净化字符
+        sed "s/{{DOMAIN}}/$DOMAIN/g" /tmp/emby_raw.conf | tr -d '\r' > /tmp/emby_final.conf
+        echo "" >> /tmp/emby_final.conf # 确保结尾有换行符
+        sudo mv /tmp/emby_final.conf $CONF_TARGET
     else
-        sudo curl -s "$REPO_RAW/emby-404.html" -o "$HTML_DIR/cyber-404.html"
+        echo -e "\n❌ 错误：无法从 GitHub 获取 emby.conf"
+        echo "请检查链接：$REPO_RAW/emby.conf 是否可以正常访问。"
+        exit 1
     fi
 
-    echo "4. 从 GitHub 拉取并净化配置..."
-    # 核心修正：下载 -> 替换域名 -> 清理 Windows 换行符 -> 清理不可见字符 -> 确保末尾有换行
-    curl -s "$REPO_RAW/emby.conf" | \
-    sed "s/{{DOMAIN}}/$DOMAIN/g" | \
-    tr -d '\r' | \
-    sed 's/[[:space:]]*$//' > /tmp/emby_clean.conf
-    echo "" >> /tmp/emby_clean.conf
-    
-    sudo mv /tmp/emby_clean.conf $CONF_TARGET
+    echo "5. 重启 Nginx 服务..."
     sudo rm -f /etc/nginx/sites-enabled/default || true
-
-    echo "5. 验证并重启 Nginx..."
     if sudo nginx -t; then
         sudo systemctl restart nginx
         sudo ln -sf "$(readlink -f "$0")" /usr/local/bin/emby
         sudo chmod +x /usr/local/bin/emby
-        echo -e "\n✅ 部署成功！域名: https://$DOMAIN"
+        echo -e "\n✅ 部署成功！"
+        echo "使用方式：https://$DOMAIN/目标域名"
     else
-        echo -e "\n❌ 配置验证失败。内容预览如下："
-        cat -A $CONF_TARGET | head -n 5
-        echo "..."
-        cat -A $CONF_TARGET | tail -n 5
+        echo -e "\n❌ Nginx 配置验证失败，请手动检查 $CONF_TARGET"
     fi
 }
 
@@ -79,6 +79,7 @@ uninstall() {
     fi
 }
 
+# --- 主程序 ---
 while true; do
     show_menu
     case $opt in
