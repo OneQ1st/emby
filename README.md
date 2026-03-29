@@ -1,5 +1,5 @@
 ```
-cd /root && rm -rf emby-worker && \
+cd /root && rm -rf emby && \
 git clone https://github.com/OneQ1st/emby.git && \
 cd emby-worker && \
 chmod +x emby.sh && \
