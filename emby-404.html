@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ACCESS DENIED</title>
+    <style>
+        body { background: #0a0a0a; color: #00ff9d; font-family: 'Courier New', monospace; text-align: center; padding: 80px 20px; }
+        .cyber { font-size: 4.5rem; font-weight: bold; text-shadow: 0 0 30px #00ff9d; animation: glitch 0.8s infinite; }
+        .info { font-size: 1.6rem; margin: 30px 0; color: #ff00ff; }
+        blockquote { font-size: 1.3rem; color: #00ffff; margin-top: 50px; }
+        @keyframes glitch { 0%,100% { transform: translate(0); } 20% { transform: translate(-4px, 4px); } 40% { transform: translate(4px, -4px); } }
+    </style>
+</head>
+<body>
+    <h1 class="cyber">ACCESS DENIED</h1>
+    <p class="info">该服务仅限 Emby / Jellyfin 客户端访问</p>
+    <p>浏览器直接访问已被拒绝</p>
+    <blockquote id="hitokoto">加载一言中...</blockquote>
+
+    <script>
+        fetch('https://v1.hitokoto.cn')
+            .then(r => r.json())
+            .then(data => document.getElementById('hitokoto').innerText = data.hitokoto)
+            .catch(() => document.getElementById('hitokoto').innerText = "原神启动失败");
+    </script>
+</body>
+</html>
