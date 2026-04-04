@@ -1,12 +1,6 @@
 #!/bin/bash
 # ========================================
 # Emby-Workers VPS 极简部署脚本 (V4.0)
-# 新增功能：
-#   • 自定义证书路径（LetsEncrypt / 自签名 / 手动指定）
-#   • 自定义 Nginx 监听端口（HTTP/HTTPS）
-#   • 支持无域名纯IP反代
-#   • 白名单 IP 可自定义
-#   • emby.conf 使用占位符模板（不影响原有逻辑）
 # ========================================
 
 set -e
@@ -16,13 +10,14 @@ REPO_RAW="https://raw.githubusercontent.com/OneQ1st/emby/main"
 CONF_TARGET="/etc/nginx/conf.d/emby.conf"
 HTML_DIR="/var/www/emby-404"
 SSL_DIR="/etc/nginx/ssl"
-WORKDIR=\( (cd " \)(dirname "$0")"; pwd)
+# 修正第 19 行的语法错误
+WORKDIR=$(cd "$(dirname "$0")"; pwd)
 
 show_menu() {
     clear
     echo "========================================"
     echo "    Emby-Workers 动态反代部署工具    "
-    echo "               V4.0                  "
+    echo "                V4.0                   "
     echo "========================================"
     echo "1. 一键安装 / 更新配置"
     echo "2. 彻底卸载"
@@ -107,12 +102,12 @@ install() {
     # === 同步 404 页面 ===
     echo "3. 同步 404 页面资源..."
     sudo mkdir -p $HTML_DIR
-    curl -s -f "$REPO_RAW/emby-404.html" -o "$HTML_DIR/cyber-404.html" || \
+    curl -s -L -f "$REPO_RAW/emby-404.html" -o "$HTML_DIR/cyber-404.html" || \
     echo "<h1>404 Not Found</h1>" > "$HTML_DIR/cyber-404.html"
 
     # === 拉取并渲染配置模板 ===
     echo "4. 部署 Nginx 配置..."
-    curl -s -f "$REPO_RAW/emby.conf" -o /tmp/emby_raw.conf || {
+    curl -s -L -f "$REPO_RAW/emby.conf" -o /tmp/emby_raw.conf || {
         echo "错误：无法从 GitHub 获取 emby.conf"
         exit 1
     }
@@ -133,18 +128,21 @@ install() {
     sudo rm -f /etc/nginx/sites-enabled/default || true
     if sudo nginx -t; then
         sudo systemctl restart nginx
-        sudo ln -sf "$(readlink -f "$0")" /usr/local/bin/emby
-        sudo chmod +x /usr/local/bin/emby
+        
+        # 修复软连接逻辑：只有当脚本不在 /usr/local/bin/emby 时才创建
+        if [[ "$(readlink -f "$0")" != "/usr/local/bin/emby" ]]; then
+            sudo ln -sf "$(readlink -f "$0")" /usr/local/bin/emby
+            sudo chmod +x /usr/local/bin/emby
+        fi
 
         # 成功提示
-        if [[ $HTTPS_PORT -eq 443 ]]; then
+        if [[ "$HTTPS_PORT" == "443" ]]; then
             ACCESS_URL="https://$SERVER_NAME"
         else
             ACCESS_URL="https://$SERVER_NAME:$HTTPS_PORT"
         fi
         echo -e "\n✅ 部署成功！"
         echo "访问地址：$ACCESS_URL/目标域名"
-        echo "使用方式：https://$SERVER_NAME[:$HTTPS_PORT]/目标IP或域名"
     else
         echo -e "\n❌ Nginx 配置验证失败，请检查 $CONF_TARGET"
     fi
