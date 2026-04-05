@@ -1,6 +1,7 @@
 #!/bin/bash
 # ========================================
 # Emby-Workers VPS 极简部署脚本 (V4.0)
+# 修正：增加 NAT 环境支持与 acme.sh DNS 验证
 # ========================================
 
 set -e
@@ -10,7 +11,6 @@ REPO_RAW="https://raw.githubusercontent.com/OneQ1st/emby/main"
 CONF_TARGET="/etc/nginx/conf.d/emby.conf"
 HTML_DIR="/var/www/emby-404"
 SSL_DIR="/etc/nginx/ssl"
-# 修正第 19 行的语法错误
 WORKDIR=$(cd "$(dirname "$0")"; pwd)
 
 show_menu() {
@@ -27,7 +27,7 @@ show_menu() {
 }
 
 install() {
-    # === 模式选择 ===
+    # === 模式与网络环境选择 ===
     read -p "请选择模式 (domain/ip，默认 domain): " MODE
     MODE=${MODE:-domain}
 
@@ -36,11 +36,20 @@ install() {
         [[ -z "$DOMAIN" ]] && { echo "域名不能为空"; exit 1; }
         SERVER_NAME="$DOMAIN"
         CERT_AUTO="letsencrypt"
+        
+        # 新增：NAT 机器判定
+        echo "----------------------------------------"
+        echo "请确认服务器网络环境："
+        echo "1. 常规 VPS (公网 80 端口正常开放，使用 Certbot 自动验证)"
+        echo "2. NAT 机器 (外网 80 端口被封/映射，使用 Cloudflare API 验证)"
+        read -p "选择环境 [1/2] (默认 1): " NET_MODE
+        NET_MODE=${NET_MODE:-1}
     else
         read -p "输入服务器公网IP: " IP
         [[ -z "$IP" ]] && { echo "IP不能为空"; exit 1; }
         SERVER_NAME="$IP"
         CERT_AUTO="selfsigned"
+        NET_MODE=1
     fi
 
     # === 端口自定义 ===
@@ -53,13 +62,21 @@ install() {
     read -p "证书模式 (auto=自动/custom=手动指定，默认 auto): " CERT_MODE
     CERT_MODE=${CERT_MODE:-auto}
 
+    # 预设证书路径 (根据环境动态调整)
     if [[ "$CERT_MODE" == "custom" ]]; then
         read -p "请输入 fullchain.pem 完整路径: " SSL_FULLCHAIN
         read -p "请输入 privkey.pem 完整路径: " SSL_KEY
     else
         if [[ "$CERT_AUTO" == "letsencrypt" ]]; then
-            SSL_FULLCHAIN="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
-            SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+            if [[ "$NET_MODE" == "2" ]]; then
+                # acme.sh 存放路径
+                SSL_FULLCHAIN="$SSL_DIR/$DOMAIN/fullchain.pem"
+                SSL_KEY="$SSL_DIR/$DOMAIN/privkey.pem"
+            else
+                # Certbot 存放路径
+                SSL_FULLCHAIN="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+                SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+            fi
         else
             SSL_FULLCHAIN="$SSL_DIR/emby-ip-fullchain.pem"
             SSL_KEY="$SSL_DIR/emby-ip-privkey.pem"
@@ -75,16 +92,49 @@ install() {
     fi
 
     # === 安装依赖 ===
-    echo "1. 安装必要组件 (Nginx/Certbot)..."
-    sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx openssl
+    echo "1. 安装必要组件 (Nginx/Certbot/Cron)..."
+    sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx openssl cron curl socat
 
     # === 申请/生成证书 ===
     echo "2. 处理 SSL 证书..."
     if [[ "$CERT_MODE" == "custom" ]]; then
         echo "使用自定义证书路径：$SSL_FULLCHAIN"
     elif [[ "$CERT_AUTO" == "letsencrypt" ]]; then
-        if [[ ! -f "$SSL_FULLCHAIN" ]]; then
-            sudo certbot certonly --nginx -d "$DOMAIN" --agree-tos --non-interactive --register-unsafely-without-email || true
+        if [[ "$NET_MODE" == "2" ]]; then
+            # NAT 环境：使用 acme.sh + CF API
+            sudo mkdir -p "$SSL_DIR/$DOMAIN"
+            if [[ ! -f "$SSL_FULLCHAIN" ]]; then
+                echo "▶ NAT 环境：正在配置 acme.sh 与 Cloudflare DNS API..."
+                if [[ ! -f ~/.acme.sh/acme.sh ]]; then
+                    curl https://get.acme.sh | sh -s email=admin@$DOMAIN
+                fi
+                
+                echo "请输入 Cloudflare API Token (需具备 Zone.DNS:Edit 权限):"
+                read -p "CF_Token: " CF_TOKEN_INPUT
+                echo "请输入 Cloudflare Account ID (选填，为空可能导致部分子域名报错):"
+                read -p "CF_Account_ID: " CF_ACCOUNT_ID_INPUT
+                
+                export CF_Token="$CF_TOKEN_INPUT"
+                [[ -n "$CF_ACCOUNT_ID_INPUT" ]] && export CF_Account_ID="$CF_ACCOUNT_ID_INPUT"
+
+                # 申请并安装证书
+                ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" --force
+                ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
+                    --key-file "$SSL_KEY" \
+                    --fullchain-file "$SSL_FULLCHAIN" \
+                    --reloadcmd "systemctl restart nginx"
+            else
+                echo "证书已存在，跳过申请。"
+            fi
+        else
+            # 常规环境：改用 standalone 模式，避免配置死锁
+            if [[ ! -f "$SSL_FULLCHAIN" ]]; then
+                echo "▶ 常规环境：使用 Certbot 申请证书..."
+                sudo systemctl stop nginx || true
+                sudo certbot certonly --standalone -d "$DOMAIN" --agree-tos --non-interactive --register-unsafely-without-email || true
+            else
+                echo "证书已存在，跳过申请。"
+            fi
         fi
     else
         # 自签名证书（纯IP模式）
@@ -129,13 +179,11 @@ install() {
     if sudo nginx -t; then
         sudo systemctl restart nginx
         
-        # 修复软连接逻辑：只有当脚本不在 /usr/local/bin/emby 时才创建
         if [[ "$(readlink -f "$0")" != "/usr/local/bin/emby" ]]; then
             sudo ln -sf "$(readlink -f "$0")" /usr/local/bin/emby
             sudo chmod +x /usr/local/bin/emby
         fi
 
-        # 成功提示
         if [[ "$HTTPS_PORT" == "443" ]]; then
             ACCESS_URL="https://$SERVER_NAME"
         else
@@ -154,7 +202,7 @@ uninstall() {
         sudo rm -f $CONF_TARGET
         sudo rm -rf $HTML_DIR
         sudo rm -f /usr/local/bin/emby
-        sudo rm -rf $SSL_DIR/emby-ip-* 2>/dev/null || true
+        sudo rm -rf $SSL_DIR 2>/dev/null || true
         sudo systemctl restart nginx
         echo "卸载完成。"
     fi
