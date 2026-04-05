@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==========================================
-# Emby-Workers 高性能安装脚本 V5.1
+# Emby-Workers 高性能安装脚本 V5.2 (带 IP 白名单)
 # ==========================================
 set -e
 
@@ -9,7 +9,6 @@ SSL_DIR="/etc/nginx/ssl"
 CONF_TARGET="/etc/nginx/conf.d/emby.conf"
 HTML_DIR="/var/www/emby-404"
 
-# 证书检索逻辑
 check_cert() {
     local d=$1
     local p1="$HOME/.acme.sh/${d}_ecc/fullchain.cer"
@@ -24,11 +23,27 @@ install() {
     read -p "请输入解析到此 VPS 的域名: " DOMAIN
     [[ -z "$DOMAIN" ]] && exit 1
     
+    # --- [新增] 交互式 IP 白名单逻辑 ---
+    echo "------------------------------------------"
+    echo "🛡️  配置 IP 白名单 (直接回车跳过, 允许所有 IP)"
+    echo "提示: 输入具体的 IP (如 1.2.3.4) 或段 (如 1.2.3.0/24)"
+    WHITE_LIST_CONTENT=""
+    while true; do
+        read -p "请输入要允许的 IP: " USER_IP
+        if [[ -z "$USER_IP" ]]; then break; fi
+        WHITE_LIST_CONTENT="${WHITE_LIST_CONTENT}    allow $USER_IP;\n"
+    done
+
+    if [[ -n "$WHITE_LIST_CONTENT" ]]; then
+        # 如果设置了白名单，最后必须加上 deny all
+        WHITE_LIST_CONTENT="${WHITE_LIST_CONTENT}    deny all;"
+    fi
+    # ------------------------------------------
+
     echo "选择模式: 1.常规 2.NAT(DNS验证)"
     read -p "选择 [1/2]: " NET_MODE
     NET_MODE=${NET_MODE:-1}
 
-    # 处理证书
     if ! check_cert "$DOMAIN"; then
         [[ ! -f ~/.acme.sh/acme.sh ]] && curl https://get.acme.sh | sh
         if [[ "$NET_MODE" == "2" ]]; then
@@ -45,26 +60,27 @@ install() {
         SSL_KEY="$SSL_DIR/$DOMAIN/privkey.pem"
     fi
 
-    # 部署并渲染配置
-    echo "🚀 正在下载并渲染高性能配置..."
+    echo "🚀 正在拉取并注入高性能配置..."
     curl -sSL "$REPO_RAW/emby.conf" -o "$CONF_TARGET"
     
-    # 渲染所有占位符
+    # 渲染变量
     sed -i "s|{{SERVER_NAME}}|$DOMAIN|g" "$CONF_TARGET"
     sed -i "s|{{SSL_CERTIFICATE}}|$SSL_FULLCHAIN|g" "$CONF_TARGET"
     sed -i "s|{{SSL_CERTIFICATE_KEY}}|$SSL_KEY|g" "$CONF_TARGET"
     sed -i "s|{{HTTP_PORT}}|80|g" "$CONF_TARGET"
     sed -i "s|{{HTTPS_PORT}}|443|g" "$CONF_TARGET"
-    sed -i "s|{{WHITELIST}}||g" "$CONF_TARGET"
+    
+    # 注入白名单内容
+    # 注意: sed 使用 @ 作为分隔符防止路径中的 / 冲突，但在处理 \n 时需要特殊处理
+    perl -i -pe "s|\{\{WHITELIST\}\}|$WHITE_LIST_CONTENT|g" "$CONF_TARGET"
 
-    # 同步 404 页面 (从 GitHub 获取 emby-404.html 保存为 cyber-404.html)
     echo "📂 同步静态资源..."
     mkdir -p "$HTML_DIR"
     curl -sSL "$REPO_RAW/emby-404.html" -o "$HTML_DIR/cyber-404.html"
 
     nginx -t && systemctl restart nginx
     echo "✅ 部署完成！"
-    echo "🌐 你的万能网关地址: https://$DOMAIN"
+    [[ -n "$WHITE_LIST_CONTENT" ]] && echo "🔒 已启用 IP 白名单保护。"
 }
 
 install
