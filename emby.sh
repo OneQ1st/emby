@@ -1,13 +1,15 @@
 #!/bin/bash
+# ==========================================
+# Emby-Workers 高性能安装脚本 V5.1
+# ==========================================
 set -e
 
-# --- 基础配置 (对齐你的 GitHub 路径) ---
 REPO_RAW="https://raw.githubusercontent.com/OneQ1st/emby/main"
 SSL_DIR="/etc/nginx/ssl"
 CONF_TARGET="/etc/nginx/conf.d/emby.conf"
 HTML_DIR="/var/www/emby-404"
 
-# --- 证书检索函数 ---
+# 证书检索逻辑
 check_cert() {
     local d=$1
     local p1="$HOME/.acme.sh/${d}_ecc/fullchain.cer"
@@ -18,7 +20,7 @@ check_cert() {
 }
 
 install() {
-    apt update && apt install -y nginx curl openssl
+    apt update && apt install -y nginx curl openssl git
     read -p "请输入解析到此 VPS 的域名: " DOMAIN
     [[ -z "$DOMAIN" ]] && exit 1
     
@@ -26,9 +28,8 @@ install() {
     read -p "选择 [1/2]: " NET_MODE
     NET_MODE=${NET_MODE:-1}
 
-    # 证书处理
+    # 处理证书
     if ! check_cert "$DOMAIN"; then
-        echo "▶ 正在申请新证书..."
         [[ ! -f ~/.acme.sh/acme.sh ]] && curl https://get.acme.sh | sh
         if [[ "$NET_MODE" == "2" ]]; then
             read -p "请输入 CF_Token: " cf_token
@@ -44,24 +45,26 @@ install() {
         SSL_KEY="$SSL_DIR/$DOMAIN/privkey.pem"
     fi
 
-    # --- 部署 Nginx 配置 ---
-    echo "🚀 正在从 GitHub 拉取最新配置..."
+    # 部署并渲染配置
+    echo "🚀 正在下载并渲染高性能配置..."
     curl -sSL "$REPO_RAW/emby.conf" -o "$CONF_TARGET"
+    
+    # 渲染所有占位符
     sed -i "s|{{SERVER_NAME}}|$DOMAIN|g" "$CONF_TARGET"
     sed -i "s|{{SSL_CERTIFICATE}}|$SSL_FULLCHAIN|g" "$CONF_TARGET"
     sed -i "s|{{SSL_CERTIFICATE_KEY}}|$SSL_KEY|g" "$CONF_TARGET"
-    # 默认端口 443
+    sed -i "s|{{HTTP_PORT}}|80|g" "$CONF_TARGET"
     sed -i "s|{{HTTPS_PORT}}|443|g" "$CONF_TARGET"
+    sed -i "s|{{WHITELIST}}||g" "$CONF_TARGET"
 
-    # --- 关键：下载你的 emby-404.html ---
-    echo "📂 正在下载自定义 404 页面..."
+    # 同步 404 页面 (从 GitHub 获取 emby-404.html 保存为 cyber-404.html)
+    echo "📂 同步静态资源..."
     mkdir -p "$HTML_DIR"
-    # 这里对齐你的文件名 emby-404.html
-    curl -sSL "$REPO_RAW/emby-404.html" -o "$HTML_DIR/emby-404.html"
+    curl -sSL "$REPO_RAW/emby-404.html" -o "$HTML_DIR/cyber-404.html"
 
     nginx -t && systemctl restart nginx
     echo "✅ 部署完成！"
-    echo "🌐 网关地址: https://$DOMAIN"
+    echo "🌐 你的万能网关地址: https://$DOMAIN"
 }
 
 install
