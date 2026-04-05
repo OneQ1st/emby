@@ -1,36 +1,31 @@
 #!/bin/bash
-# 开启“报错即退出”模式，防止错误扩大
+# ========================================
+# Emby-Workers 自动化部署脚本 V4.2
+# 修复：变量传递、证书检索、acme.sh 逻辑
+# ========================================
 set -e
 
-# --- 1. 配置路径 ---
+# --- 基础配置 ---
 REPO_RAW="https://raw.githubusercontent.com/OneQ1st/emby/main"
 SSL_DIR="/etc/nginx/ssl"
 CONF_TARGET="/etc/nginx/conf.d/emby.conf"
+HTML_DIR="/var/www/emby-404"
 
-# --- 2. 自动检索证书 (核心新功能) ---
+# --- 自动检索证书函数 ---
 check_existing_cert() {
-    local domain=$1
+    local d=$1
     echo "🔍 正在检索本地是否存在有效证书..."
-    
-    # 检索路径：acme.sh 默认路径、Certbot 路径、脚本自定义路径
     local paths=(
-        "$HOME/.acme.sh/${domain}_ecc/fullchain.cer"
-        "/etc/letsencrypt/live/$domain/fullchain.pem"
-        "$SSL_DIR/$domain/fullchain.pem"
+        "$HOME/.acme.sh/${d}_ecc/fullchain.cer"
+        "/etc/letsencrypt/live/$d/fullchain.pem"
+        "$SSL_DIR/$d/fullchain.pem"
     )
-
     for p in "${paths[@]}"; do
         if [[ -f "$p" ]]; then
-            # 检查证书有效期 (是否在3天内过期)
-            if openssl x509 -checkend 259200 -noout -in "$p" > /dev/null 2>&1; then
+            if openssl x509 -checkend 86400 -noout -in "$p" > /dev/null 2>&1; then
                 echo "✅ 找到有效证书: $p"
                 SSL_FULLCHAIN="$p"
-                # 智能匹配私钥路径
-                if [[ "$p" == *".cer" ]]; then
-                    SSL_KEY="${p/fullchain.cer/$domain.key}"
-                else
-                    SSL_KEY="${p/fullchain.pem/privkey.pem}"
-                fi
+                [[ "$p" == *".cer" ]] && SSL_KEY="${p/fullchain.cer/$d.key}" || SSL_KEY="${p/fullchain.pem/privkey.pem}"
                 return 0
             fi
         fi
@@ -38,58 +33,79 @@ check_existing_cert() {
     return 1
 }
 
-# --- 3. 最稳妥申请方式 (acme.sh DNS/Standalone) ---
+# --- 最稳妥申请函数 ---
 apply_cert() {
-    local domain=$1
-    local mode=$2
-
-    echo "▶ 准备通过 acme.sh 申请证书..."
-    # 确保环境中有 acme.sh
-    if [ ! -f ~/.acme.sh/acme.sh ]; then
-        curl https://get.acme.sh | sh -s email=admin@$domain
-    fi
+    local d="$1"
+    local mode="$2"
     
-    # 强制重新加载环境
-    source ~/.bashrc || true
+    if [ -z "$d" ]; then echo "❌ 错误: 域名变量为空！"; exit 1; fi
+
+    echo "▶ 准备通过 acme.sh 申请证书，域名: $d"
+    [[ ! -f ~/.acme.sh/acme.sh ]] && curl https://get.acme.sh | sh -s email=admin@$d
+    
+    # 显式指定 acme.sh 路径
     local ACME="$HOME/.acme.sh/acme.sh"
 
     if [[ "$mode" == "2" ]]; then
-        echo "🌐 NAT机环境：使用 Cloudflare DNS API 模式 (最稳)"
+        echo "🌐 NAT 环境：使用 Cloudflare DNS API"
         read -p "请输入 CF_Token: " cf_token
         export CF_Token="$cf_token"
-        $ACME --issue --dns dns_cf -d "$domain" --force
+        "$ACME" --issue --dns dns_cf -d "$d" --force
     else
-        echo "🖥️ 常规VPS：使用 Standalone 模式"
+        echo "🖥️ 常规 VPS：使用 Standalone 模式"
         systemctl stop nginx || true
-        $ACME --issue --standalone -d "$domain" --force
+        "$ACME" --issue --standalone -d "$d" --force
     fi
 
-    # 统一安装到 Nginx 目录，解耦路径
-    mkdir -p "$SSL_DIR/$domain"
-    $ACME --install-cert -d "$domain" \
-        --key-file "$SSL_DIR/$domain/privkey.pem" \
-        --fullchain-file "$SSL_DIR/$domain/fullchain.pem" \
+    mkdir -p "$SSL_DIR/$d"
+    "$ACME" --install-cert -d "$d" \
+        --key-file "$SSL_DIR/$d/privkey.pem" \
+        --fullchain-file "$SSL_DIR/$d/fullchain.pem" \
         --reloadcmd "systemctl restart nginx"
 
-    SSL_FULLCHAIN="$SSL_DIR/$domain/fullchain.pem"
-    SSL_KEY="$SSL_DIR/$domain/privkey.pem"
+    SSL_FULLCHAIN="$SSL_DIR/$d/fullchain.pem"
+    SSL_KEY="$SSL_DIR/$d/privkey.pem"
 }
 
-# --- 4. 主安装逻辑 ---
+# --- 主安装函数 ---
 install() {
-    # ... (省略域名和端口输入) ...
+    # 1. 交互输入 (确保变量在此阶段获取)
+    read -p "请输入解析到此 VPS 的域名: " DOMAIN
+    [[ -z "$DOMAIN" ]] && { echo "❌ 域名不能为空"; exit 1; }
 
-    # 证书处理流程
+    echo "选择网络模式: 1.常规VPS(80端口通) 2.NAT机(使用DNS验证)"
+    read -p "选择 [1/2]: " NET_MODE
+    NET_MODE=${NET_MODE:-1}
+
+    read -p "请输入 HTTPS 监听端口 (默认 443): " HTTPS_PORT
+    HTTPS_PORT=${HTTPS_PORT:-443}
+
+    # 2. 证书逻辑
     if check_existing_cert "$DOMAIN"; then
-        read -p "检测到有效证书，是否直接使用？(y/n, 默认y): " use_old
+        read -p "检测到有效证书，直接使用？(y/n): " use_old
         [[ "${use_old:-y}" != "y" ]] && apply_cert "$DOMAIN" "$NET_MODE"
     else
         apply_cert "$DOMAIN" "$NET_MODE"
     fi
 
-    # 部署 Nginx 配置文件 (注意：这里使用上面确定的 SSL_FULLCHAIN 变量进行 sed 替换)
-    # ... (此处执行 curl 下载 emby.conf 并替换 {{SSL_CERTIFICATE}} 等占位符) ...
+    # 3. 部署 Nginx 配置文件
+    echo "🚀 正在部署 Nginx 配置..."
+    apt install -y nginx
+    curl -sSL "$REPO_RAW/emby.conf" -o "$CONF_TARGET"
+    
+    # 使用 sed 替换占位符
+    sed -i "s|{{SERVER_NAME}}|$DOMAIN|g" "$CONF_TARGET"
+    sed -i "s|{{HTTPS_PORT}}|$HTTPS_PORT|g" "$CONF_TARGET"
+    sed -i "s|{{SSL_CERTIFICATE}}|$SSL_FULLCHAIN|g" "$CONF_TARGET"
+    sed -i "s|{{SSL_CERTIFICATE_KEY}}|$SSL_KEY|g" "$CONF_TARGET"
+
+    # 4. 404 页面处理
+    mkdir -p "$HTML_DIR"
+    curl -sSL "$REPO_RAW/cyber-404.html" -o "$HTML_DIR/cyber-404.html" || echo "跳过404下载"
+
+    nginx -t && systemctl restart nginx
+    echo "✅ 部署完成！访问: https://$DOMAIN:$HTTPS_PORT"
 }
 
-# --- 脚本结尾必须有触发函数 ---
+# 运行主程序
 install
