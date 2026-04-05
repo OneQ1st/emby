@@ -1,18 +1,18 @@
 #!/bin/bash
+# 开启“报错即退出”模式，防止错误扩大
 set -e
 
-# --- 核心配置 ---
+# --- 1. 配置路径 ---
 REPO_RAW="https://raw.githubusercontent.com/OneQ1st/emby/main"
-CONF_TARGET="/etc/nginx/conf.d/emby.conf"
 SSL_DIR="/etc/nginx/ssl"
-HTML_DIR="/var/www/emby-404"
+CONF_TARGET="/etc/nginx/conf.d/emby.conf"
 
-# ================= 1. 自动检索证书逻辑 =================
-find_existing_cert() {
+# --- 2. 自动检索证书 (核心新功能) ---
+check_existing_cert() {
     local domain=$1
-    echo "🔍 正在自动检索本地证书..."
+    echo "🔍 正在检索本地是否存在有效证书..."
     
-    # 定义可能的检索路径 (acme.sh, letsencrypt, 自定义)
+    # 检索路径：acme.sh 默认路径、Certbot 路径、脚本自定义路径
     local paths=(
         "$HOME/.acme.sh/${domain}_ecc/fullchain.cer"
         "/etc/letsencrypt/live/$domain/fullchain.pem"
@@ -21,11 +21,11 @@ find_existing_cert() {
 
     for p in "${paths[@]}"; do
         if [[ -f "$p" ]]; then
-            # 检查证书是否在 3 天内过期
+            # 检查证书有效期 (是否在3天内过期)
             if openssl x509 -checkend 259200 -noout -in "$p" > /dev/null 2>&1; then
-                echo "✅ 发现有效证书: $p"
+                echo "✅ 找到有效证书: $p"
                 SSL_FULLCHAIN="$p"
-                # 尝试匹配私钥
+                # 智能匹配私钥路径
                 if [[ "$p" == *".cer" ]]; then
                     SSL_KEY="${p/fullchain.cer/$domain.key}"
                 else
@@ -38,30 +38,33 @@ find_existing_cert() {
     return 1
 }
 
-# ================= 2. 申请证书逻辑 (acme.sh 方案) =================
-apply_new_cert() {
+# --- 3. 最稳妥申请方式 (acme.sh DNS/Standalone) ---
+apply_cert() {
     local domain=$1
-    local mode=$2 # 1=普通, 2=NAT
+    local mode=$2
 
-    echo "▶ 准备通过 acme.sh 申请新证书 (最稳妥方案)..."
-    [[ ! -f ~/.acme.sh/acme.sh ]] && curl https://get.acme.sh | sh -s email=admin@$domain
+    echo "▶ 准备通过 acme.sh 申请证书..."
+    # 确保环境中有 acme.sh
+    if [ ! -f ~/.acme.sh/acme.sh ]; then
+        curl https://get.acme.sh | sh -s email=admin@$domain
+    fi
     
-    # 强制加载环境
+    # 强制重新加载环境
     source ~/.bashrc || true
     local ACME="$HOME/.acme.sh/acme.sh"
 
     if [[ "$mode" == "2" ]]; then
-        echo "检测为 NAT 环境，需使用 Cloudflare DNS 验证:"
-        read -p "请输入 Cloudflare API Token: " CF_Token
-        export CF_Token="$CF_Token"
+        echo "🌐 NAT机环境：使用 Cloudflare DNS API 模式 (最稳)"
+        read -p "请输入 CF_Token: " cf_token
+        export CF_Token="$cf_token"
         $ACME --issue --dns dns_cf -d "$domain" --force
     else
-        echo "常规环境，使用 Standalone 验证 (将临时停止 Nginx):"
+        echo "🖥️ 常规VPS：使用 Standalone 模式"
         systemctl stop nginx || true
         $ACME --issue --standalone -d "$domain" --force
     fi
 
-    # 安装证书到统一位置，方便 Nginx 引用
+    # 统一安装到 Nginx 目录，解耦路径
     mkdir -p "$SSL_DIR/$domain"
     $ACME --install-cert -d "$domain" \
         --key-file "$SSL_DIR/$domain/privkey.pem" \
@@ -72,26 +75,21 @@ apply_new_cert() {
     SSL_KEY="$SSL_DIR/$domain/privkey.pem"
 }
 
-# ================= 3. 安装主流程 =================
+# --- 4. 主安装逻辑 ---
 install() {
-    read -p "输入解析到此 VPS 的域名: " DOMAIN
-    [[ -z "$DOMAIN" ]] && exit 1
+    # ... (省略域名和端口输入) ...
 
-    echo "选择网络环境: 1.常规VPS  2.NAT机(80端口不通)"
-    read -p "选择 [1/2]: " NET_MODE
-    NET_MODE=${NET_MODE:-1}
-
-    # 自动检索证书
-    if find_existing_cert "$DOMAIN"; then
-        read -p "检测到有效证书，是否直接使用？(y/n, 默认 y): " use_old
-        [[ "${use_old:-y}" != "y" ]] && apply_new_cert "$DOMAIN" "$NET_MODE"
+    # 证书处理流程
+    if check_existing_cert "$DOMAIN"; then
+        read -p "检测到有效证书，是否直接使用？(y/n, 默认y): " use_old
+        [[ "${use_old:-y}" != "y" ]] && apply_cert "$DOMAIN" "$NET_MODE"
     else
-        apply_new_cert "$DOMAIN" "$NET_MODE"
+        apply_cert "$DOMAIN" "$NET_MODE"
     fi
 
-    # 部署 Nginx 配置 (此处会使用上面确定的 SSL_FULLCHAIN 变量)
-    echo "4. 部署 Nginx 配置..."
-    # ... (此处接你原有的 curl 和 sed 替换逻辑) ...
+    # 部署 Nginx 配置文件 (注意：这里使用上面确定的 SSL_FULLCHAIN 变量进行 sed 替换)
+    # ... (此处执行 curl 下载 emby.conf 并替换 {{SSL_CERTIFICATE}} 等占位符) ...
 }
 
-# ... (此处接 show_menu 和 while 循环) ...
+# --- 脚本结尾必须有触发函数 ---
+install
