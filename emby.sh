@@ -1,11 +1,9 @@
 #!/bin/bash
 set -e
-
 REPO_RAW="https://raw.githubusercontent.com/OneQ1st/emby/main"
 SSL_DIR="/etc/nginx/ssl"
 CONF_TARGET="/etc/nginx/conf.d/emby.conf"
 HTML_DIR="/var/www/emby-404"
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -23,11 +21,10 @@ check_cert() {
 }
 
 uninstall_emby() {
-    echo -e "${RED}正在执行彻底卸载...${NC}"
+    echo -e "${RED}正在彻底卸载...${NC}"
     rm -f "$CONF_TARGET"
     rm -rf "$HTML_DIR"
-    echo -e "${YELLOW}是否删除 SSL 证书目录? [y/N]${NC}"
-    read -p "> " del_ssl
+    read -p "是否删除 SSL 目录? [y/N]: " del_ssl
     [[ "$del_ssl" == "y" ]] && rm -rf "$SSL_DIR"
     nginx -t && systemctl restart nginx
     echo -e "${GREEN}卸载完成！${NC}"
@@ -42,7 +39,7 @@ install_emby() {
     WHITE_LIST_CONTENT=""
     echo -e "${YELLOW}🛡️ 配置 IP 白名单 (回车跳过)${NC}"
     while true; do
-        read -p "允许访问的 IP/段: " USER_IP
+        read -p "允许 IP: " USER_IP
         [[ -z "$USER_IP" ]] && break
         WHITE_LIST_CONTENT="${WHITE_LIST_CONTENT}    allow $USER_IP;\n"
     done
@@ -51,9 +48,9 @@ install_emby() {
     DYNAMIC_MAP_CONTENT=""
     echo -e "${YELLOW}🔗 配置 SNI 映射表 (回车跳过)${NC}"
     while true; do
-        read -p "后端域名 (如 example.com): " T_DOM
+        read -p "后端 (如 emos.best): " T_DOM
         [[ -z "$T_DOM" ]] && break
-        read -p "伪装 SNI (如 apple-cdn.net): " S_DOM
+        read -p "SNI (如 apple-cdn.net): " S_DOM
         [[ -z "$S_DOM" ]] && continue
         DYNAMIC_MAP_CONTENT="${DYNAMIC_MAP_CONTENT}    $T_DOM    \"$S_DOM\";\n"
     done
@@ -75,6 +72,7 @@ install_emby() {
         SSL_KEY="$SSL_DIR/$DOMAIN/privkey.pem"
     fi
 
+    echo -e "${YELLOW}🚀 同步远程配置...${NC}"
     curl -sSL "$REPO_RAW/emby.conf" -o "$CONF_TARGET"
     mkdir -p "$HTML_DIR"
     curl -sSL "$REPO_RAW/emby-404.html" -o "$HTML_DIR/cyber-404.html"
@@ -89,7 +87,7 @@ install_emby() {
     perl -i -pe "s|\{\{DYNAMIC_MAP\}\}|$DYNAMIC_MAP_CONTENT|g" "$CONF_TARGET"
 
     nginx -t && systemctl restart nginx
-    echo -e "${GREEN}✅ 安装成功！${NC}"
+    echo -e "${GREEN}✅ 安装/更新成功！${NC}"
 }
 
 clear
