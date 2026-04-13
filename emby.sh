@@ -51,7 +51,7 @@ install_emby() {
     DYNAMIC_MAP_CONTENT=""
     echo -e "${YELLOW}🔗 配置 SNI 映射表 (回车跳过)${NC}"
     while true; do
-        read -p "后端域名 (如 emby.my): " T_DOM
+        read -p "后端域名 (如 example.com): " T_DOM
         [[ -z "$T_DOM" ]] && break
         read -p "伪装 SNI (如 apple-cdn.net): " S_DOM
         [[ -z "$S_DOM" ]] && continue
