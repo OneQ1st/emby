@@ -9,14 +9,34 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
+# 核心逻辑：检查本地证书是否存在
 check_cert() {
     local d=$1
+    # 路径1: acme.sh 默认路径
     local p1="$HOME/.acme.sh/${d}_ecc/fullchain.cer"
+    # 路径2: certbot 默认路径
     local p2="/etc/letsencrypt/live/$d/fullchain.pem"
+    # 路径3: 脚本自定义安装路径
     local p3="$SSL_DIR/$d/fullchain.pem"
-    if [[ -f "$p1" ]]; then SSL_FULLCHAIN="$p1"; SSL_KEY="${p1/fullchain.cer/$d.key}"; return 0; fi
-    if [[ -f "$p2" ]]; then SSL_FULLCHAIN="$p2"; SSL_KEY="${p2/fullchain.pem/privkey.pem}"; return 0; fi
-    if [[ -f "$p3" ]]; then SSL_FULLCHAIN="$p3"; SSL_KEY="$SSL_DIR/$d/privkey.pem"; return 0; fi
+
+    if [[ -f "$p1" ]]; then 
+        SSL_FULLCHAIN="$p1"
+        SSL_KEY="${p1/fullchain.cer/$d.key}"
+        echo -e "${GREEN}检测到 acme.sh 证书: $p1${NC}"
+        return 0
+    fi
+    if [[ -f "$p2" ]]; then 
+        SSL_FULLCHAIN="$p2"
+        SSL_KEY="/etc/letsencrypt/live/$d/privkey.pem"
+        echo -e "${GREEN}检测到 certbot 证书: $p2${NC}"
+        return 0
+    fi
+    if [[ -f "$p3" ]]; then 
+        SSL_FULLCHAIN="$p3"
+        SSL_KEY="$SSL_DIR/$d/privkey.pem"
+        echo -e "${GREEN}检测到自定义目录证书: $p3${NC}"
+        return 0
+    fi
     return 1
 }
 
@@ -36,6 +56,7 @@ install_emby() {
     read -p "> " DOMAIN
     [[ -z "$DOMAIN" ]] && exit 1
 
+    # --- 原有逻辑：IP 白名单配置 ---
     WHITE_LIST_CONTENT=""
     echo -e "${YELLOW}🛡️ 配置 IP 白名单 (回车跳过)${NC}"
     while true; do
@@ -45,6 +66,7 @@ install_emby() {
     done
     [[ -n "$WHITE_LIST_CONTENT" ]] && WHITE_LIST_CONTENT="${WHITE_LIST_CONTENT}    deny all;"
 
+    # --- 原有逻辑：SNI 映射配置 ---
     DYNAMIC_MAP_CONTENT=""
     echo -e "${YELLOW}🔗 配置 SNI 映射表 (回车跳过)${NC}"
     while true; do
@@ -55,11 +77,13 @@ install_emby() {
         DYNAMIC_MAP_CONTENT="${DYNAMIC_MAP_CONTENT}    $T_DOM    \"$S_DOM\";\n"
     done
 
-    if ! check_cert "$DOMAIN"; then
-        echo -e "${YELLOW}正在初始化 acme.sh 证书申请环境...${NC}"
+    # --- 核心修复：先检查证书，只有没有证书时才进入申请流程 ---
+    if check_cert "$DOMAIN"; then
+        echo -e "${GREEN}使用现有证书，跳过申请流程。${NC}"
+    else
+        echo -e "${YELLOW}未检测到有效证书，准备申请新证书...${NC}"
         [[ ! -f ~/.acme.sh/acme.sh ]] && curl https://get.acme.sh | sh
         
-        # 修复 acme.sh 默认 CA 问题与邮箱问题
         ~/.acme.sh/acme.sh --register-account -m "emby_admin@${DOMAIN}"
         ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
 
@@ -77,10 +101,8 @@ install_emby() {
             fi
         }
 
-        # 首次尝试申请，若失败则自动切换备用 CA (解决 dpdns.org CAA 解析报错)
         if ! issue_func; then
-            echo -e "${RED}Let's Encrypt 验证失败 (可能是 DNS CAA 问题)${NC}"
-            echo -e "${YELLOW}正在切换备用颁发机构: Buypass...${NC}"
+            echo -e "${RED}Let's Encrypt 验证失败，尝试备用 CA: Buypass...${NC}"
             ~/.acme.sh/acme.sh --set-default-ca --server buypass
             issue_func
         fi
@@ -99,6 +121,7 @@ install_emby() {
     mkdir -p "$HTML_DIR"
     curl -sSL "$REPO_RAW/emby-404.html" -o "$HTML_DIR/cyber-404.html"
 
+    # 替换配置文件中的占位符
     sed -i "s|{{SERVER_NAME}}|$DOMAIN|g" "$CONF_TARGET"
     sed -i "s|{{SSL_CERTIFICATE}}|$SSL_FULLCHAIN|g" "$CONF_TARGET"
     sed -i "s|{{SSL_CERTIFICATE_KEY}}|$SSL_KEY|g" "$CONF_TARGET"
@@ -108,9 +131,14 @@ install_emby() {
     perl -i -pe "s|\{\{WHITELIST\}\}|$WHITE_LIST_CONTENT|g" "$CONF_TARGET"
     perl -i -pe "s|\{\{DYNAMIC_MAP\}\}|$DYNAMIC_MAP_CONTENT|g" "$CONF_TARGET"
 
-    nginx -t && systemctl restart nginx
-    echo -e "${GREEN}✅ 安装/更新成功！${NC}"
-    echo -e "${YELLOW}检测到直连需求：已强制开启 TCP Fast Open 与 8MB 缓冲优化。${NC}"
+    # 检查并重启 Nginx
+    if nginx -t; then
+        systemctl restart nginx
+        echo -e "${GREEN}✅ 安装/更新成功！${NC}"
+    else
+        echo -e "${RED}❌ Nginx 配置错误，请检查生成的配置文件${NC}"
+        exit 1
+    fi
 }
 
 clear
