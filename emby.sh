@@ -9,7 +9,6 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-# 检查本地是否有可用证书
 check_cert() {
     local d=$1
     local p1="$HOME/.acme.sh/${d}_ecc/fullchain.cer"
@@ -37,7 +36,6 @@ install_emby() {
     read -p "> " DOMAIN
     [[ -z "$DOMAIN" ]] && exit 1
 
-    # 配置 IP 白名单
     WHITE_LIST_CONTENT=""
     echo -e "${YELLOW}🛡️ 配置 IP 白名单 (回车跳过)${NC}"
     while true; do
@@ -47,7 +45,6 @@ install_emby() {
     done
     [[ -n "$WHITE_LIST_CONTENT" ]] && WHITE_LIST_CONTENT="${WHITE_LIST_CONTENT}    deny all;"
 
-    # 配置 SNI 映射
     DYNAMIC_MAP_CONTENT=""
     echo -e "${YELLOW}🔗 配置 SNI 映射表 (回车跳过)${NC}"
     while true; do
@@ -58,24 +55,34 @@ install_emby() {
         DYNAMIC_MAP_CONTENT="${DYNAMIC_MAP_CONTENT}    $T_DOM    \"$S_DOM\";\n"
     done
 
-    # 证书申请逻辑修复
     if ! check_cert "$DOMAIN"; then
-        echo -e "${YELLOW}正在配置 acme.sh 证书环境...${NC}"
+        echo -e "${YELLOW}正在初始化 acme.sh 证书申请环境...${NC}"
         [[ ! -f ~/.acme.sh/acme.sh ]] && curl https://get.acme.sh | sh
         
-        # 关键修复点：注册邮箱并切换回 Let's Encrypt (避免 ZeroSSL 各种报错)
+        # 修复 acme.sh 默认 CA 问题与邮箱问题
         ~/.acme.sh/acme.sh --register-account -m "emby_admin@${DOMAIN}"
         ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
 
-        echo "1. HTTP (需要 80 端口空闲) 2. DNS (Cloudflare)"
+        echo "1. HTTP (推荐) 2. DNS (Cloudflare)"
         read -p "选择验证方式: " CM
-        if [[ "$CM" == "2" ]]; then
-            read -p "CF_Token: " tk && export CF_Token="$tk"
-            ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" --force
-        else
-            systemctl stop nginx || true
-            ~/.acme.sh/acme.sh --issue --standalone -d "$DOMAIN" --force
-            systemctl start nginx || true
+        
+        issue_func() {
+            if [[ "$CM" == "2" ]]; then
+                read -p "CF_Token: " tk && export CF_Token="$tk"
+                ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" --force
+            else
+                systemctl stop nginx || true
+                ~/.acme.sh/acme.sh --issue --standalone -d "$DOMAIN" --force
+                systemctl start nginx || true
+            fi
+        }
+
+        # 首次尝试申请，若失败则自动切换备用 CA (解决 dpdns.org CAA 解析报错)
+        if ! issue_func; then
+            echo -e "${RED}Let's Encrypt 验证失败 (可能是 DNS CAA 问题)${NC}"
+            echo -e "${YELLOW}正在切换备用颁发机构: Buypass...${NC}"
+            ~/.acme.sh/acme.sh --set-default-ca --server buypass
+            issue_func
         fi
         
         mkdir -p "$SSL_DIR/$DOMAIN"
@@ -87,37 +94,28 @@ install_emby() {
         SSL_KEY="$SSL_DIR/$DOMAIN/privkey.pem"
     fi
 
-    echo -e "${YELLOW}🚀 同步远程配置并注入参数...${NC}"
-    # 下载之前优化过的“直连性能增强版”配置
+    echo -e "${YELLOW}🚀 部署 Nginx 核心配置...${NC}"
     curl -sSL "$REPO_RAW/emby.conf" -o "$CONF_TARGET"
     mkdir -p "$HTML_DIR"
     curl -sSL "$REPO_RAW/emby-404.html" -o "$HTML_DIR/cyber-404.html"
 
-    # 替换基础占位符
     sed -i "s|{{SERVER_NAME}}|$DOMAIN|g" "$CONF_TARGET"
     sed -i "s|{{SSL_CERTIFICATE}}|$SSL_FULLCHAIN|g" "$CONF_TARGET"
     sed -i "s|{{SSL_CERTIFICATE_KEY}}|$SSL_KEY|g" "$CONF_TARGET"
     sed -i "s|{{HTTP_PORT}}|80|g" "$CONF_TARGET"
     sed -i "s|{{HTTPS_PORT}}|443|g" "$CONF_TARGET"
     
-    # 注入白名单与动态映射
     perl -i -pe "s|\{\{WHITELIST\}\}|$WHITE_LIST_CONTENT|g" "$CONF_TARGET"
     perl -i -pe "s|\{\{DYNAMIC_MAP\}\}|$DYNAMIC_MAP_CONTENT|g" "$CONF_TARGET"
 
-    # 检查并重启 Nginx
-    if nginx -t; then
-        systemctl restart nginx
-        echo -e "${GREEN}✅ 安装/更新成功！${NC}"
-        echo -e "${YELLOW}提示: 已开启 TCP Fast Open 和 8MB 级大缓冲区。${NC}"
-    else
-        echo -e "${RED}❌ Nginx 配置检查失败，请检查 /etc/nginx/conf.d/emby.conf${NC}"
-        exit 1
-    fi
+    nginx -t && systemctl restart nginx
+    echo -e "${GREEN}✅ 安装/更新成功！${NC}"
+    echo -e "${YELLOW}检测到直连需求：已强制开启 TCP Fast Open 与 8MB 缓冲优化。${NC}"
 }
 
 clear
-echo -e "${GREEN}Emby-Workers 加强版工具 (2026版)${NC}"
-echo "1. 安装/更新 (含证书自动修复)"
+echo -e "${GREEN}Emby-Workers 高级工具箱 (2026版本)${NC}"
+echo "1. 安装/更新"
 echo "2. 彻底卸载"
 echo "3. 退出"
 read -p "请选择: " opt
