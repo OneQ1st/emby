@@ -58,7 +58,8 @@ uninstall_emby() {
 # --- 安装函数 ---
 install_emby() {
     echo -e "${GREEN}开始安装 Emby 核心反代网关...${NC}"
-    apt update && apt install -y nginx curl openssl perl sed
+    # 增加 cron 和 socat (acme.sh 依赖)
+    apt update && apt install -y nginx curl openssl perl sed socat cron
 
     read -p "请输入解析后的域名: " DOMAIN
     [[ -z "$DOMAIN" ]] && { echo -e "${RED}域名不能为空${NC}"; exit 1; }
@@ -75,41 +76,48 @@ install_emby() {
     # ================== 证书申请逻辑 ==================
     if ! check_cert "$DOMAIN"; then
         echo -e "${YELLOW}未检测到本地证书，尝试通过 acme.sh 申请...${NC}"
-        [[ ! -f ~/.acme.sh/acme.sh ]] && curl https://get.acme.sh | sh
-        ~/.acme.sh/acme.sh --register-account -m "admin@${DOMAIN}"
-        ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+        
+        # 确保 acme.sh 安装成功
+        if [[ ! -f "$HOME/.acme.sh/acme.sh" ]]; then
+            curl https://get.acme.sh | sh -s email=admin@$DOMAIN
+            # 如果还不行，强制安装
+            [[ ! -f "$HOME/.acme.sh/acme.sh" ]] && $HOME/.acme.sh/acme.sh --install --force
+        fi
+        
+        # 别名方便调用
+        ACME="$HOME/.acme.sh/acme.sh"
+        
+        $ACME --register-account -m "admin@${DOMAIN}"
+        $ACME --set-default-ca --server letsencrypt
         
         echo -e "\n${CYAN}请选择证书验证方式:${NC}"
-        echo "1. HTTP Standalone (需确保 80 端口未被占用，且域名已解析到本机)"
-        echo "2. DNS Cloudflare (需提供 CF_Token)"
-        echo "3. DNS 阿里云 (需提供 Ali_Key 和 Ali_Secret)"
-        echo "4. DNS 腾讯云/DNSPod (需提供 DP_Id 和 DP_Key)"
+        echo "1. HTTP Standalone (需确保 80 端口未被占用)"
+        echo "2. DNS Cloudflare (需 Token)"
+        echo "3. DNS 阿里云 (需 Key/Secret)"
+        echo "4. DNS 腾讯云/DNSPod (需 ID/Key)"
         read -p "请输入选项 [1-4]: " CM
 
         issue_func() {
             case "$CM" in
                 2)
-                    read -p "请输入 Cloudflare Token: " tk
-                    export CF_Token="$tk"
-                    ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" --force
+                    read -p "请输入 Cloudflare Token: " tk && export CF_Token="$tk"
+                    $ACME --issue --dns dns_cf -d "$DOMAIN" --force
                     ;;
                 3)
                     read -p "请输入 Aliyun AccessKey ID: " ali_key
                     read -p "请输入 Aliyun AccessKey Secret: " ali_sec
-                    export Ali_Key="$ali_key"
-                    export Ali_Secret="$ali_sec"
-                    ~/.acme.sh/acme.sh --issue --dns dns_ali -d "$DOMAIN" --force
+                    export Ali_Key="$ali_key" && export Ali_Secret="$ali_sec"
+                    $ACME --issue --dns dns_ali -d "$DOMAIN" --force
                     ;;
                 4)
                     read -p "请输入 DNSPod ID: " dp_id
                     read -p "请输入 DNSPod Token: " dp_token
-                    export DP_Id="$dp_id"
-                    export DP_Key="$dp_token"
-                    ~/.acme.sh/acme.sh --issue --dns dns_dp -d "$DOMAIN" --force
+                    export DP_Id="$dp_id" && export DP_Key="$dp_token"
+                    $ACME --issue --dns dns_dp -d "$DOMAIN" --force
                     ;;
                 *)
                     systemctl stop nginx || true
-                    ~/.acme.sh/acme.sh --issue --standalone -d "$DOMAIN" --force
+                    $ACME --issue --standalone -d "$DOMAIN" --force
                     systemctl start nginx || true
                     ;;
             esac
@@ -117,12 +125,12 @@ install_emby() {
         
         if ! issue_func; then
             echo -e "${YELLOW}主服务器申请失败，尝试备用服务器 (Buypass)...${NC}"
-            ~/.acme.sh/acme.sh --set-default-ca --server buypass
+            $ACME --set-default-ca --server buypass
             issue_func
         fi
 
         mkdir -p "$SSL_DIR/$DOMAIN"
-        ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
+        $ACME --install-cert -d "$DOMAIN" \
             --key-file "$SSL_DIR/$DOMAIN/privkey.pem" \
             --fullchain-file "$SSL_DIR/$DOMAIN/fullchain.pem"
         SSL_FULLCHAIN="$SSL_DIR/$DOMAIN/fullchain.pem"
@@ -130,7 +138,7 @@ install_emby() {
     fi
     # ==================================================
 
-    # 下载配置文件
+    # 获取配置模板
     echo -e "${YELLOW}正在从远程获取配置文件模板...${NC}"
     curl -sSL "$REPO_RAW/emby.conf" -o "$CONF_TARGET"
     mkdir -p "$HTML_DIR"
@@ -143,15 +151,11 @@ install_emby() {
     sed -i "s|{{HTTP_PORT}}|80|g" "$CONF_TARGET"
     sed -i "s|{{HTTPS_PORT}}|443|g" "$CONF_TARGET"
     
-    # 使用 perl 替换白名单，注意转义处理
     perl -i -pe "s|\{\{WHITELIST\}\}|$WHITE_LIST_CONTENT|g" "$CONF_TARGET"
 
-    # ========================================================
-    # 核心修复步骤：清理可能被误转义的 \~*
-    # ========================================================
+    # 语法修正
     echo -e "${YELLOW}正在进行语法修正，移除无效转义符...${NC}"
     sed -i 's/\\~\*/~\*/g' "$CONF_TARGET"
-    # ========================================================
 
     # 测试并重启
     if nginx -t; then
