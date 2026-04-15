@@ -11,6 +11,7 @@ HTML_DIR="/var/www/emby-404"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 # --- 证书检查函数 ---
@@ -71,27 +72,51 @@ install_emby() {
     done
     [[ -n "$WHITE_LIST_CONTENT" ]] && WHITE_LIST_CONTENT="${WHITE_LIST_CONTENT}    deny all;"
 
-    # 证书申请逻辑
+    # ================== 证书申请逻辑 ==================
     if ! check_cert "$DOMAIN"; then
         echo -e "${YELLOW}未检测到本地证书，尝试通过 acme.sh 申请...${NC}"
         [[ ! -f ~/.acme.sh/acme.sh ]] && curl https://get.acme.sh | sh
         ~/.acme.sh/acme.sh --register-account -m "admin@${DOMAIN}"
         ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
         
-        read -p "选择验证方式 (1.HTTP Standalone  2.DNS Cloudflare): " CM
+        echo -e "\n${CYAN}请选择证书验证方式:${NC}"
+        echo "1. HTTP Standalone (需确保 80 端口未被占用，且域名已解析到本机)"
+        echo "2. DNS Cloudflare (需提供 CF_Token)"
+        echo "3. DNS 阿里云 (需提供 Ali_Key 和 Ali_Secret)"
+        echo "4. DNS 腾讯云/DNSPod (需提供 DP_Id 和 DP_Key)"
+        read -p "请输入选项 [1-4]: " CM
+
         issue_func() {
-            if [[ "$CM" == "2" ]]; then
-                read -p "请输入 Cloudflare Token: " tk && export CF_Token="$tk"
-                ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" --force
-            else
-                systemctl stop nginx || true
-                ~/.acme.sh/acme.sh --issue --standalone -d "$DOMAIN" --force
-                systemctl start nginx || true
-            fi
+            case "$CM" in
+                2)
+                    read -p "请输入 Cloudflare Token: " tk
+                    export CF_Token="$tk"
+                    ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" --force
+                    ;;
+                3)
+                    read -p "请输入 Aliyun AccessKey ID: " ali_key
+                    read -p "请输入 Aliyun AccessKey Secret: " ali_sec
+                    export Ali_Key="$ali_key"
+                    export Ali_Secret="$ali_sec"
+                    ~/.acme.sh/acme.sh --issue --dns dns_ali -d "$DOMAIN" --force
+                    ;;
+                4)
+                    read -p "请输入 DNSPod ID: " dp_id
+                    read -p "请输入 DNSPod Token: " dp_token
+                    export DP_Id="$dp_id"
+                    export DP_Key="$dp_token"
+                    ~/.acme.sh/acme.sh --issue --dns dns_dp -d "$DOMAIN" --force
+                    ;;
+                *)
+                    systemctl stop nginx || true
+                    ~/.acme.sh/acme.sh --issue --standalone -d "$DOMAIN" --force
+                    systemctl start nginx || true
+                    ;;
+            esac
         }
         
         if ! issue_func; then
-            echo -e "${YELLOW}主服务器申请失败，尝试备用服务器...${NC}"
+            echo -e "${YELLOW}主服务器申请失败，尝试备用服务器 (Buypass)...${NC}"
             ~/.acme.sh/acme.sh --set-default-ca --server buypass
             issue_func
         fi
@@ -103,6 +128,7 @@ install_emby() {
         SSL_FULLCHAIN="$SSL_DIR/$DOMAIN/fullchain.pem"
         SSL_KEY="$SSL_DIR/$DOMAIN/privkey.pem"
     fi
+    # ==================================================
 
     # 下载配置文件
     echo -e "${YELLOW}正在从远程获取配置文件模板...${NC}"
