@@ -201,7 +201,7 @@ EOF
         systemctl restart nginx
         echo -e "------------------------------------------------"
         echo -e "${GREEN}部署成功!${NC}"
-        echo -e "代理域名: ${CYAN}https://$DOMAIN:40889${NC}"
+        echo -e "代理域名: ${CYAN}https://$DOMAIN:port${NC}"
         echo -e "------------------------------------------------"
     else
         echo -e "${RED}配置有误，请检查日志${NC}"
