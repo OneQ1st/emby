@@ -87,28 +87,64 @@ apply_cert_dns_cf() {
     fi
 }
 
+uninstall_all() {
+    read -p "请输入要卸载的域名: " DOMAIN
+    [[ -z "$DOMAIN" ]] && exit 1
+    
+    echo -e "${YELLOW}正在清理配置与证书...${NC}"
+    rm -f "$CONF_TARGET"
+    rm -rf "$SSL_DIR" "$HTML_DIR"
+    
+    if command -v certbot >/dev/null 2>&1; then
+        certbot delete --cert-name "$DOMAIN" || true
+    fi
+    
+    rm -f "$CF_CRED_FILE"
+    
+    systemctl reload nginx || true
+    echo -e "${GREEN}✅ 彻底卸载完成${NC}"
+}
+
 main() {
     [[ $EUID -ne 0 ]] && echo -e "${RED}必须 root 运行${NC}" && exit 1
 
-    echo -e "${YELLOW}选择申请方式:${NC}"
-    echo "1) HTTP (Nginx)"
-    echo "2) DNS (Cloudflare Token)"
-    read -p "选择: " MODE
+    echo -e "${YELLOW}=== Emby 反代管理工具 ===${NC}"
+    echo "1) 安装 - HTTP 验证 (Nginx)"
+    echo "2) 安装 - DNS 验证 (Cloudflare Token)"
+    echo "3) 彻底卸载 (清理配置与证书)"
+    echo "0) 退出"
+    read -p "请选择: " MODE
 
-    read -p "输入域名: " DOMAIN
-    [[ -z "$DOMAIN" ]] && exit 1
-
-    ensure_deps
-    
     case "$MODE" in
-        1) apply_cert_http "$DOMAIN" ;;
-        2) apply_cert_dns_cf "$DOMAIN" ;;
-        *) exit 1 ;;
+        1)
+            read -p "输入域名: " DOMAIN
+            [[ -z "$DOMAIN" ]] && exit 1
+            ensure_deps
+            apply_cert_http "$DOMAIN"
+            mkdir -p "$SSL_DIR" "$HTML_DIR"
+            systemctl reload nginx
+            echo -e "${GREEN}部署完成${NC}"
+            ;;
+        2)
+            read -p "输入域名: " DOMAIN
+            [[ -z "$DOMAIN" ]] && exit 1
+            ensure_deps
+            apply_cert_dns_cf "$DOMAIN"
+            mkdir -p "$SSL_DIR" "$HTML_DIR"
+            systemctl reload nginx
+            echo -e "${GREEN}部署完成${NC}"
+            ;;
+        3)
+            uninstall_all
+            ;;
+        0)
+            exit 0
+            ;;
+        *)
+            echo "无效选项"
+            exit 1
+            ;;
     esac
-
-    mkdir -p "$SSL_DIR" "$HTML_DIR"
-    systemctl reload nginx
-    echo -e "${GREEN}部署完成${NC}"
 }
 
 main
