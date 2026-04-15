@@ -18,7 +18,7 @@ NC='\033[0m'
 # --- 权限检查 ---
 [[ $EUID -ne 0 ]] && echo -e "${RED}请使用 root 权限运行${NC}" && exit 1
 
-# --- 环境检查与证书获取函数 ---
+# --- 检查证书函数 (保持原样) ---
 check_cert() {
     local d=$1
     local p1="$HOME/.acme.sh/${d}_ecc/fullchain.cer"
@@ -30,7 +30,41 @@ check_cert() {
     return 1
 }
 
-# --- 核心安装逻辑 ---
+# --- 彻底删除/卸载函数 (新增) ---
+uninstall_emby() {
+    echo -e "${YELLOW}正在彻底清理 Emby 代理相关配置...${NC}"
+    
+    # 1. 删除 Nginx 配置
+    if [[ -f "$CONF_TARGET" ]]; then
+        rm -f "$CONF_TARGET"
+        echo -e "${CYAN}已删除 Nginx 配置文件: $CONF_TARGET${NC}"
+    fi
+
+    # 2. 删除 404 HTML 目录
+    if [[ -d "$HTML_DIR" ]]; then
+        rm -rf "$HTML_DIR"
+        echo -e "${CYAN}已删除 HTML 目录: $HTML_DIR${NC}"
+    fi
+
+    # 3. 询问是否删除证书 (可选，默认不删以防其他业务使用)
+    read -p "是否同时删除该域名相关的 SSL 证书目录? [y/N]: " DEL_CERT
+    if [[ "$DEL_CERT" =~ ^[Yy]$ ]]; then
+        read -p "输入要清理证书的域名: " DEL_DOMAIN
+        rm -rf "$SSL_DIR/$DEL_DOMAIN"
+        echo -e "${CYAN}已清理证书目录: $SSL_DIR/$DEL_DOMAIN${NC}"
+    fi
+
+    # 4. 重启 Nginx
+    if nginx -t > /dev/null 2>&1; then
+        systemctl restart nginx
+        echo -e "${GREEN}卸载完成，Nginx 已重载。${NC}"
+    else
+        echo -e "${RED}Nginx 配置存在其他错误，请手动检查。${NC}"
+    fi
+    exit 0
+}
+
+# --- 核心安装逻辑 (保持原样) ---
 install_emby_pro() {
     echo -e "${GREEN}正在同步基础环境...${NC}"
     apt update && apt install -y nginx-full curl openssl sed socat cron
@@ -38,10 +72,9 @@ install_emby_pro() {
     read -p "请输入反代域名: " DOMAIN
     [[ -z "$DOMAIN" ]] && exit 1
 
-    # 1. 证书申请逻辑 (新增 Cloudflare Token 方式)
     if ! check_cert "$DOMAIN"; then
         echo -e "${YELLOW}证书未发现，请选择申请方式:${NC}"
-        echo "1) 独立服务器模式 (Standalone - 需开启并占用 80 端口)"
+        echo "1) 独立服务器模式 (Standalone - 需占用 80 端口)"
         echo "2) Cloudflare DNS 模式 (使用 API Token - 推荐)"
         read -p "选择 [1-2]: " CERT_MODE
 
@@ -63,13 +96,11 @@ install_emby_pro() {
         SSL_KEY="$SSL_DIR/$DOMAIN/privkey.pem"
     fi
 
-    # 2. 部署 404 页面
     echo -e "${YELLOW}同步 404 自定义页面...${NC}"
     mkdir -p "$HTML_DIR"
     curl -sLo "$HTML_FILE" "$GITHUB_HTML_URL"
     chown -R www-data:www-data "$HTML_DIR"
 
-    # 3. 生成 Nginx 配置
     echo -e "${YELLOW}生成增强版 Nginx 动态反代配置...${NC}"
     cat > "$CONF_TARGET" << 'EOF'
 map $http_upgrade $connection_upgrade {
@@ -96,16 +127,13 @@ server {
     resolver 1.1.1.1 8.8.8.8 ipv6=off valid=300s;
     resolver_timeout 5s;
 
-    # 配置自定义 404 页面
     error_page 404 /emby-404.html;
 
-    # 处理 404 文件请求
     location = /emby-404.html {
         root {{HTML_ROOT}};
         internal;
     }
 
-    # 万能反代逻辑
     location ~* "^/(?<raw_proto>https?|wss?)://(?<raw_target>[a-zA-Z0-9\.-]+)(?:[:/_](?<raw_port>\d+))?(?<raw_path>/.*)?$" {
         
         if ($is_emby_client = 0) { return 403 "Unauthorized Client"; }
@@ -137,7 +165,6 @@ server {
         proxy_ssl_name $raw_target;
         proxy_ssl_verify off;
 
-        # 跨域修复 (兼容 CapyPlayer)
         proxy_hide_header 'Access-Control-Allow-Origin';
         proxy_hide_header 'Access-Control-Allow-Methods';
         proxy_hide_header 'Access-Control-Allow-Headers';
@@ -165,7 +192,6 @@ server {
 }
 EOF
 
-    # 占位符替换
     sed -i "s|{{DOMAIN}}|$DOMAIN|g" "$CONF_TARGET"
     sed -i "s|{{CERT}}|$SSL_FULLCHAIN|g" "$CONF_TARGET"
     sed -i "s|{{KEY}}|$SSL_KEY|g" "$CONF_TARGET"
@@ -173,12 +199,29 @@ EOF
 
     if nginx -t; then
         systemctl restart nginx
+        echo -e "------------------------------------------------"
         echo -e "${GREEN}部署成功!${NC}"
-        echo -e "404 页面已同步并应用。${NC}"
+        echo -e "代理域名: ${CYAN}https://$DOMAIN:40889${NC}"
+        echo -e "------------------------------------------------"
     else
         echo -e "${RED}配置有误，请检查日志${NC}"
         exit 1
     fi
 }
 
-install_emby_pro
+# --- 主入口 ---
+clear
+echo -e "${CYAN}====================================${NC}"
+echo -e "${CYAN}   Emby 万能动态反代自动化脚本      ${NC}"
+echo -e "${CYAN}====================================${NC}"
+echo -e "1) 安装/更新 反代配置"
+echo -e "2) 彻底卸载 反代配置与目录"
+echo -e "q) 退出"
+read -p "请选择操作 [1-2/q]: " MAIN_CHOICE
+
+case $MAIN_CHOICE in
+    1) install_emby_pro ;;
+    2) uninstall_emby ;;
+    q) exit 0 ;;
+    *) echo -e "${RED}输入错误${NC}" ; exit 1 ;;
+esac
