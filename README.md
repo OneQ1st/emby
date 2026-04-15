@@ -1,7 +1,7 @@
 ```
 apt update && apt install -y git
 cd /root && rm -rf emby && \
-git clone https://github.com/OneQ1st/emby.git && \
+git clone https://github.com/OneQ1st/emby/blob/main/emby.sh && \
 cd emby && \
 chmod +x emby.sh && \
 sudo cp emby.sh /usr/local/bin/emby && \
