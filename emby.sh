@@ -64,7 +64,6 @@ map $http_user_agent $is_emby_client {
 }
 
 server {
-    # 自动监听多个常用端口，你可以根据需要增减
     listen 80;
     listen 443 ssl http2;
     listen 40889 ssl http2; 
@@ -74,17 +73,15 @@ server {
     ssl_certificate {{CERT}};
     ssl_certificate_key {{KEY}};
 
-    # 允许特殊 URL 格式，不合并斜杠
     merge_slashes off;
 
-    # 动态解析必选
-    resolver 1.1.1.1 8.8.8.8 valid=300s;
+    # 加入 ipv6=off 防止 Nginx 尝试连接 Cloudflare 的 IPv6 节点导致 Network Unreachable 报错
+    resolver 1.1.1.1 8.8.8.8 ipv6=off valid=300s;
     resolver_timeout 5s;
 
-    # ================== 万能抓取正则 ==================
+    # ================== 万能抓取正则 (保持原样不动) ==================
     location ~* "^/(?<raw_proto>https?|wss?)://(?<raw_target>[a-zA-Z0-9\.-]+)(?:[:/_](?<raw_port>\d+))?(?<raw_path>/.*)?$" {
         
-        # 如果不通，可以暂时注释掉下面这行校验
         if ($is_emby_client = 0) { return 403 "Unauthorized Client"; }
 
         set $target_proto $raw_proto;
@@ -93,24 +90,19 @@ server {
         set $final_path $raw_path;
         if ($final_path = "") { set $final_path "/"; }
 
-        # 反代执行
         proxy_pass $target_proto://$raw_target$target_port$final_path$is_args$args;
 
-        # 核心：内容全量抓取与重写
         proxy_set_header Accept-Encoding ""; 
         sub_filter_types *;
         sub_filter_once off;
         
-        # 动态重写流地址，自动补全当前域名和端口 ($http_host)
         sub_filter ':"http' ':"$scheme://$http_host/http';
         sub_filter '\"http' '\"$scheme://$http_host/http';
         sub_filter 'http\:\/\/' '$scheme\:\/\/$http_host\/http\:\/\/';
         sub_filter 'https\:\/\/' '$scheme\:\/\/$http_host\/https\:\/\/';
 
-        # 劫持重定向
         proxy_redirect ~*^https?://(?<re_host>[^/]+)(?<re_path>.*)$ $scheme://$http_host/https://$re_host$re_path;
 
-        # 基础头部
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
@@ -119,11 +111,30 @@ server {
         proxy_ssl_name $raw_target;
         proxy_ssl_verify off;
 
-        # 播放器跨域修正
+        # ==========================================
+        # CapyPlayer 专属跨域修正区 (仅修改此处)
+        # ==========================================
+        # 1. 强制隐藏后端 Emby 自带的跨域头，防止出现重复导致 Capy 报错
+        proxy_hide_header 'Access-Control-Allow-Origin';
+        proxy_hide_header 'Access-Control-Allow-Methods';
+        proxy_hide_header 'Access-Control-Allow-Headers';
+
+        # 2. 注入干净的标准跨域头，并暴露 CapyPlayer 读取视频进度所需的 Content-Range
         add_header 'Access-Control-Allow-Origin' '*' always;
-        add_header 'Access-Control-Allow-Methods' '*' always;
+        add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, RANGE' always;
         add_header 'Access-Control-Allow-Headers' '*' always;
-        if ($request_method = 'OPTIONS') { return 204; }
+        add_header 'Access-Control-Expose-Headers' 'Content-Length, Content-Range' always;
+
+        # 3. 规范化 OPTIONS 预检请求的返回格式
+        if ($request_method = 'OPTIONS') { 
+            add_header 'Access-Control-Allow-Origin' '*';
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, RANGE';
+            add_header 'Access-Control-Allow-Headers' '*';
+            add_header 'Access-Control-Max-Age' 1728000;
+            add_header 'Content-Type' 'text/plain; charset=utf-8';
+            add_header 'Content-Length' 0;
+            return 204; 
+        }
 
         # 传输优化
         proxy_buffering off;
