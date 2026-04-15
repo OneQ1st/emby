@@ -25,28 +25,36 @@ server {
 
     merge_slashes off;
     
-    # 【关键修复】禁用 IPv6，解决 Network is unreachable 报错
-    resolver 1.1.1.1 8.8.8.8 ipv6=off valid=300s;
+    # 强制 IPv4
+    resolver 1.1.1.1 8.8.8.8 ipv6=off valid=30s;
     resolver_timeout 5s;
 
-    location ~* "^/(?<raw_proto>https?|wss?)://(?<raw_target>[^:/]+)(?:[:/_](?<raw_port>\d+))?(?<raw_path>.*)$" {
+    # ========================================================================
+    # 1. 核心捕获逻辑：更加鲁棒的正则，直接提取后端域名
+    # ========================================================================
+    location ~* "^/(?<p_proto>https?)://(?<p_host>[^:/]+)(?::(?<p_port>\d+))?(?<p_uri>.*)$" {
         
-        set $target_port "";
-        if ($raw_port != "") { set $target_port ":$raw_port"; }
-        
-        # 构造后端地址
-        set $backend_url "$raw_proto://$raw_target$target_port$raw_path$is_args$args";
+        # 内部变量处理
+        set $p_real_port $p_port;
+        if ($p_real_port = "") {
+            set $p_real_port "443";
+        }
+        if ($p_proto = "http") {
+            set $p_real_port "80";
+        }
 
-        proxy_pass $backend_url;
+        # 构造发往后端的地址
+        proxy_pass $p_proto://$p_host:$p_real_port$p_uri$is_args$args;
 
-        # 内容重写
+        # --------------------------------------------------------------------
+        # 2. 内容改写 (解决 Hills/Capy 拿到真实地址的问题)
+        # --------------------------------------------------------------------
         proxy_set_header Accept-Encoding ""; 
         gzip off;
-        
         sub_filter_types *;
         sub_filter_once off;
         
-        # 动态替换
+        # 动态替换：利用 $http_host 自动适配当前访问的端口
         sub_filter ':"http' ':"$scheme://$http_host/http';
         sub_filter '\"http' '\"$scheme://$http_host/http';
         sub_filter 'http\:\/\/' '$scheme\:\/\/$http_host\/http\:\/\/';
@@ -54,17 +62,21 @@ server {
 
         proxy_redirect ~*^https?://(?<re_host>[^/]+)(?<re_path>.*)$ $scheme://$http_host/https://$re_host$re_path;
 
-        # 头部设置
+        # --------------------------------------------------------------------
+        # 3. 头部修正 (解决 502/Handshake 失败的关键)
+        # --------------------------------------------------------------------
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
-        proxy_set_header Host $raw_target;
+        
+        # 必须传后端自己的 Host，否则 Cloudflare 会拒绝连接
+        proxy_set_header Host $p_host;
         
         proxy_ssl_server_name on;
-        proxy_ssl_name $raw_target;
+        proxy_ssl_name $p_host;
         proxy_ssl_verify off;
 
-        # 万能跨域 (解决 CapyPlayer 报错)
+        # 跨域全开
         proxy_hide_header 'Access-Control-Allow-Origin';
         add_header 'Access-Control-Allow-Origin' '*' always;
         add_header 'Access-Control-Allow-Methods' '*' always;
@@ -78,13 +90,14 @@ server {
         proxy_force_ranges on;
     }
 
-    location / { return 404 "Network unreachable? Check IPv6."; }
+    location / { return 404 "Check Proxy Path Format"; }
 }
 EOF
 
+# 变量替换
 sed -i "s|{{PORT}}|$PROXY_PORT|g" "$CONF_TARGET"
 sed -i "s|{{DOMAIN}}|$DOMAIN|g" "$CONF_TARGET"
 sed -i "s|{{CERT}}|$CERT_PATH|g" "$CONF_TARGET"
 sed -i "s|{{KEY}}|$KEY_PATH|g" "$CONF_TARGET"
 
-nginx -t && systemctl restart nginx && echo "修复完成！IPv6 已禁用。"
+nginx -t && systemctl restart nginx && echo "部署完成。如果还不通，请检查是否被防火墙拦截了 $PROXY_PORT 端口。"
