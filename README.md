@@ -1,10 +1,10 @@
+更新环境
 ```
-apt update && apt install -y git
-cd /root && rm -rf emby && \
-git clone https://github.com/OneQ1st/emby/blob/main/emby.sh && \
-cd emby && \
-chmod +x emby.sh && \
-sudo cp emby.sh /usr/local/bin/emby && \
-sudo chmod +x /usr/local/bin/emby && \
+apt update && apt install -y curl sudo
+```
+运行代码
+```
+curl -sLO https://raw.githubusercontent.com/OneQ1st/emby/main/emby.sh
+chmod +x emby.sh
 sudo ./emby.sh
 ```
