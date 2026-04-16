@@ -181,13 +181,6 @@ EOF
         cat > "$TMP_BLOCK" << EOF
     location ^~ /$P_NAME/ {
         proxy_pass $P_PROTO://$P_HOST/;
-        # --- emos ---
-        proxy_set_header EMOS-PROXY-ID "7137365927";
-        proxy_set_header EMOS-PROXY-NAME "@OneQ1st";
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header Range \$http_range;
-        proxy_set_header If-Range \$http_if_range;
-        # --- End ---
         proxy_set_header Host $P_PURE_HOST;
         proxy_ssl_name $P_PURE_HOST;
         proxy_ssl_server_name on;
