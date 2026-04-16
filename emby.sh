@@ -69,7 +69,7 @@ map \$http_user_agent \$is_emby_client {
 EOF
 }
 
-# --- 1. 万能反代 (核心代码一字不动) ---
+# --- 1. 万能反代 (核心代码完整审查) ---
 deploy_universal() {
     init_env
     read -p "请输入万能反代域名: " D_UNI
@@ -138,15 +138,18 @@ EOF
     nginx -t && systemctl restart nginx && echo -e "${GREEN}万能反代部署完成！${NC}"
 }
 
-# --- 2. 单站反代 (支持完整 URL 解析) ---
+# --- 2. 单站反代 (支持交互式修改/删除路径) ---
 deploy_single() {
     init_env
     read -p "请输入单站反代域名: " D_SIN
     [[ -z "$D_SIN" ]] && return
-    handle_ssl "$D_SIN"
-
+    
     local TARGET_CONF="/etc/nginx/conf.d/emby_single.conf"
-    cat > "$TARGET_CONF" << EOF
+    
+    # 如果文件不存在，则初始化 server 块
+    if [[ ! -f "$TARGET_CONF" ]]; then
+        handle_ssl "$D_SIN"
+        cat > "$TARGET_CONF" << EOF
 server {
     listen 80;
     listen 443 ssl http2;
@@ -157,58 +160,74 @@ server {
     resolver 1.1.1.1 8.8.8.8 ipv6=off valid=300s;
     error_page 404 /emby-404.html;
     location = /emby-404.html { root $HTML_DIR; internal; }
+    location / { return 404; }
+}
 EOF
+    fi
 
     while true; do
-        read -p "添加映射路径? (y/n): " YN
-        [[ "$YN" != "y" ]] && break
-        read -p "  路径后缀 (如 path1): " P_NAME
+        echo -e "\n${CYAN}当前已配置路径：${NC}"
+        grep "location ^~ /" "$TARGET_CONF" | cut -d'/' -f2 || echo "无"
+        
+        read -p "请输入要操作的路径后缀 (如 path1, 输入 q 退出): " P_NAME
+        [[ "$P_NAME" == "q" ]] && break
+        
+        # 检查路径是否存在
+        if grep -q "location ^~ /$P_NAME/" "$TARGET_CONF"; then
+            echo -e "${YELLOW}路径 /$P_NAME/ 已存在。${NC}"
+            echo "1) 修改/覆盖"
+            echo "2) 删除该路径"
+            echo "3) 取消"
+            read -p "请选择: " P_OPT
+            case $P_OPT in
+                2)
+                    # 使用 sed 删除 location 块（匹配到下一个 } 结束）
+                    sed -i "/location \^~ \/$P_NAME\//,/}/d" "$TARGET_CONF"
+                    echo -e "${RED}已删除路径 /$P_NAME/ ${NC}"
+                    continue ;;
+                3) continue ;;
+            esac
+            # 如果选 1，则先删除旧的再添加新的
+            sed -i "/location \^~ \/$P_NAME\//,/}/d" "$TARGET_CONF"
+        fi
+
+        # 添加/覆盖逻辑
         read -p "  完整目标地址 (如 http://1.2.3.4:8096): " P_FULL_URL
-        
-        # --- 解析逻辑 ---
-        # 提取协议 (默认 https)
-        P_PROTO=$(echo $P_FULL_URL | grep :// | sed -e 's|://.*||')
-        [[ -z "$P_PROTO" ]] && P_PROTO="https"
-        
-        # 提取主机部分 (域名+端口)
+        P_PROTO=$(echo $P_FULL_URL | grep :// | sed -e 's|://.*||'); [[ -z "$P_PROTO" ]] && P_PROTO="https"
         P_HOST=$(echo $P_FULL_URL | sed -e 's|^.*://||' -e 's|/.*||')
-        
-        # 清洗 Host 用于 Header (去掉端口)
         P_PURE_HOST=$(echo $P_HOST | cut -d: -f1)
 
-        cat >> "$TARGET_CONF" << EOF
-    location ^~ /$P_NAME/ {
-        proxy_pass $P_PROTO://$P_HOST/;
-        # --- 新增的 EMOS 验证头部和特殊要求---
-        proxy_set_header EMOS-PROXY-ID "7137365927";       # 替换为你的真实ID
-        proxy_set_header EMOS-PROXY-NAME "@OneQ1st";          # 替换为你的称号
+        # 在最后一个 } 之前插入新配置
+        sed -i '$i \
+    location ^~ /'"$P_NAME"'\/ { \
+        proxy_pass '"$P_PROTO"':\/\/'"$P_HOST"'/; \
+        # --- emos 头部要求 ---
+        proxy_set_header EMOS-PROXY-ID "7137365927"; \
+        proxy_set_header EMOS-PROXY-NAME "@OneQ1st"; \
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; \
+        proxy_set_header Range $http_range; \
+        proxy_set_header If-Range $http_if_range; \
+        proxy_set_header Host '"$P_PURE_HOST"'; \
+        proxy_ssl_name '"$P_PURE_HOST"'; \
+        proxy_ssl_server_name on; \
+        proxy_ssl_verify off; \
+        proxy_http_version 1.1; \
+        proxy_set_header Upgrade $http_upgrade; \
+        proxy_set_header Connection $connection_upgrade; \
+        proxy_hide_header "Access-Control-Allow-Origin"; \
+        add_header "Access-Control-Allow-Origin" "*" always; \
+        add_header "Access-Control-Allow-Methods" "*" always; \
+        add_header "Access-Control-Allow-Headers" "*" always; \
+        add_header "Access-Control-Expose-Headers" "Content-Length, Content-Range" always; \
+        proxy_buffering off; \
+        proxy_request_buffering off; \
+        proxy_force_ranges on; \ # 206状态支持,一般默认开启
+    }' "$TARGET_CONF"
         
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header Range \$http_range;
-        proxy_set_header If-Range \$http_if_range;
-        proxy_force_ranges on;
-        # --- 新增的 EMOS 验证头部和特殊要求 End---
-        proxy_set_header Host $P_PURE_HOST;
-        proxy_ssl_name $P_PURE_HOST;
-        proxy_ssl_server_name on;
-        proxy_ssl_verify off;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_hide_header 'Access-Control-Allow-Origin';
-        add_header 'Access-Control-Allow-Origin' '*' always;
-        add_header 'Access-Control-Allow-Methods' '*' always;
-        add_header 'Access-Control-Allow-Headers' '*' always;
-        proxy_buffering off;
-        proxy_request_buffering off;
-        proxy_force_ranges on;
-    }
-EOF
+        echo -e "${GREEN}路径 /$P_NAME/ 配置成功。${NC}"
     done
 
-    echo "    location / { return 404; } " >> "$TARGET_CONF"
-    echo "}" >> "$TARGET_CONF"
-    nginx -t && systemctl restart nginx && echo -e "${GREEN}单站反代部署完成！${NC}"
+    nginx -t && systemctl restart nginx && echo -e "${GREEN}所有单站反代配置已生效！${NC}"
 }
 
 # --- 3. 卸载 ---
@@ -221,9 +240,13 @@ uninstall_all() {
 
 # --- 主菜单 ---
 clear
-echo "1) 部署 [万能动态反代]"
-echo "2) 部署 [单站路径反代] (支持 HTTP/HTTPS 完整地址)"
-echo "3) 卸载"
+echo -e "${CYAN}==================================${NC}"
+echo -e "      Emby 反代 终极管理脚本"
+echo -e "${CYAN}==================================${NC}"
+echo "1) 部署 [万能动态反代] (代码完整审查)"
+echo "2) 部署 [单站路径反代] (支持修改/删除/覆盖)"
+echo "3) 彻底卸载"
+echo "q) 退出"
 read -p "选择: " OPT
 case $OPT in
     1) deploy_universal ;;
