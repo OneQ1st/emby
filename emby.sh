@@ -179,6 +179,15 @@ EOF
         cat >> "$TARGET_CONF" << EOF
     location ^~ /$P_NAME/ {
         proxy_pass $P_PROTO://$P_HOST/;
+        # --- 新增的 EMOS 验证头部和特殊要求---
+        proxy_set_header EMOS-PROXY-ID "7137365927";       # 替换为你的真实ID
+        proxy_set_header EMOS-PROXY-NAME "@OneQ1st";          # 替换为你的称号
+        
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header Range \$http_range;
+        proxy_set_header If-Range \$http_if_range;
+        proxy_force_ranges on;
+        # --- 新增的 EMOS 验证头部和特殊要求 End---
         proxy_set_header Host $P_PURE_HOST;
         proxy_ssl_name $P_PURE_HOST;
         proxy_ssl_server_name on;
