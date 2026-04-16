@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# --- 路径与变量定义 ---
+# --- 基础路径与配置 ---
 SSL_DIR="/etc/nginx/ssl"
 CONF_TARGET="/etc/nginx/conf.d/emby.conf"
 HTML_DIR="/var/www/emby"
@@ -18,153 +18,126 @@ NC='\033[0m'
 # --- 权限检查 ---
 [[ $EUID -ne 0 ]] && echo -e "${RED}请使用 root 权限运行${NC}" && exit 1
 
-# --- 检查证书函数 (保持原样) ---
+# --- 检查证书函数 (优先检查本地是否存在) ---
 check_cert() {
     local d=$1
     local p1="$HOME/.acme.sh/${d}_ecc/fullchain.cer"
     local p2="/etc/letsencrypt/live/$d/fullchain.pem"
     local p3="$SSL_DIR/$d/fullchain.pem"
-    if [[ -f "$p1" ]]; then SSL_FULLCHAIN="$p1"; SSL_KEY="${p1/fullchain.cer/$d.key}"; return 0; fi
-    if [[ -f "$p2" ]]; then SSL_FULLCHAIN="$p2"; SSL_KEY="/etc/letsencrypt/live/$d/privkey.pem"; return 0; fi
-    if [[ -f "$p3" ]]; then SSL_FULLCHAIN="$p3"; SSL_KEY="$SSL_DIR/$d/privkey.pem"; return 0; fi
+    if [[ -f "$p1" ]]; then echo "$p1" "${p1/fullchain.cer/$d.key}"; return 0; fi
+    if [[ -f "$p2" ]]; then echo "$p2" "/etc/letsencrypt/live/$d/privkey.pem"; return 0; fi
+    if [[ -f "$p3" ]]; then echo "$p3" "$SSL_DIR/$d/privkey.pem"; return 0; fi
     return 1
 }
 
-# --- 彻底删除/卸载函数 (新增) ---
+# --- 彻底删除函数 ---
 uninstall_emby() {
-    echo -e "${YELLOW}正在彻底清理 Emby 代理相关配置...${NC}"
-    
-    # 1. 删除 Nginx 配置
-    if [[ -f "$CONF_TARGET" ]]; then
-        rm -f "$CONF_TARGET"
-        echo -e "${CYAN}已删除 Nginx 配置文件: $CONF_TARGET${NC}"
-    fi
-
-    # 2. 删除 404 HTML 目录
-    if [[ -d "$HTML_DIR" ]]; then
-        rm -rf "$HTML_DIR"
-        echo -e "${CYAN}已删除 HTML 目录: $HTML_DIR${NC}"
-    fi
-
-    # 3. 询问是否删除证书 (可选，默认不删以防其他业务使用)
-    read -p "是否同时删除该域名相关的 SSL 证书目录? [y/N]: " DEL_CERT
-    if [[ "$DEL_CERT" =~ ^[Yy]$ ]]; then
-        read -p "输入要清理证书的域名: " DEL_DOMAIN
-        rm -rf "$SSL_DIR/$DEL_DOMAIN"
-        echo -e "${CYAN}已清理证书目录: $SSL_DIR/$DEL_DOMAIN${NC}"
-    fi
-
-    # 4. 重启 Nginx
-    if nginx -t > /dev/null 2>&1; then
-        systemctl restart nginx
-        echo -e "${GREEN}卸载完成，Nginx 已重载。${NC}"
-    else
-        echo -e "${RED}Nginx 配置存在其他错误，请手动检查。${NC}"
-    fi
+    echo -e "${YELLOW}正在清理...${NC}"
+    rm -f "$CONF_TARGET"
+    rm -rf "$HTML_DIR"
+    systemctl restart nginx
+    echo -e "${GREEN}卸载完成。${NC}"
     exit 0
 }
 
-# --- 核心安装逻辑 (保持原样) ---
+# --- 核心部署逻辑 ---
 install_emby_pro() {
-    echo -e "${GREEN}正在同步基础环境...${NC}"
     apt update && apt install -y nginx-full curl openssl sed socat cron
 
-    read -p "请输入反代域名: " DOMAIN
-    [[ -z "$DOMAIN" ]] && exit 1
+    # 1. 域名输入
+    read -p "请输入通用反代域名 (Domain A, 如 example1.domain.com): " DOMAIN_A
+    read -p "请输入单站反代域名 (Domain B, 如 example2.domain.com): " DOMAIN_B
+    [[ -z "$DOMAIN_A" || -z "$DOMAIN_B" ]] && exit 1
 
-    if ! check_cert "$DOMAIN"; then
-        echo -e "${YELLOW}证书未发现，请选择申请方式:${NC}"
-        echo "1) 独立服务器模式 (Standalone - 需占用 80 端口)"
-        echo "2) Cloudflare DNS 模式 (使用 API Token - 推荐)"
-        read -p "选择 [1-2]: " CERT_MODE
-
-        [[ ! -f "$HOME/.acme.sh/acme.sh" ]] && curl https://get.acme.sh | sh -s email=admin@$DOMAIN
-
-        if [[ "$CERT_MODE" == "2" ]]; then
-            read -p "请输入 Cloudflare API Token: " CF_TOKEN
+    # 2. 证书处理 (Domain A)
+    echo -e "${CYAN}正在处理域名 A 证书...${NC}"
+    CERT_A_INFO=$(check_cert "$DOMAIN_A" || true)
+    if [[ -z "$CERT_A_INFO" ]]; then
+        read -p "域名 A 证书未发现，是否使用 CF Token 申请? [y/N]: " REQ_A
+        if [[ "$REQ_A" =~ ^[Yy]$ ]]; then
+            read -p "请输入 CF API Token: " CF_TOKEN
             export CF_Token="$CF_TOKEN"
-            "$HOME/.acme.sh/acme.sh" --issue --dns dns_cf -d "$DOMAIN" --force
+            [[ ! -f "$HOME/.acme.sh/acme.sh" ]] && curl https://get.acme.sh | sh -s email=admin@$DOMAIN_A
+            "$HOME/.acme.sh/acme.sh" --issue --dns dns_cf -d "$DOMAIN_A" --force
+            mkdir -p "$SSL_DIR/$DOMAIN_A"
+            "$HOME/.acme.sh/acme.sh" --install-cert -d "$DOMAIN_A" --key-file "$SSL_DIR/$DOMAIN_A/privkey.pem" --fullchain-file "$SSL_DIR/$DOMAIN_A/fullchain.pem"
+            SSL_A_FULL="$SSL_DIR/$DOMAIN_A/fullchain.pem"; SSL_A_KEY="$SSL_DIR/$DOMAIN_A/privkey.pem"
         else
-            "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$DOMAIN" --force
+            echo -e "${RED}无证书，退出${NC}"; exit 1
         fi
-
-        mkdir -p "$SSL_DIR/$DOMAIN"
-        "$HOME/.acme.sh/acme.sh" --install-cert -d "$DOMAIN" \
-            --key-file "$SSL_DIR/$DOMAIN/privkey.pem" \
-            --fullchain-file "$SSL_DIR/$DOMAIN/fullchain.pem"
-        SSL_FULLCHAIN="$SSL_DIR/$DOMAIN/fullchain.pem"
-        SSL_KEY="$SSL_DIR/$DOMAIN/privkey.pem"
+    else
+        SSL_A_FULL=$(echo $CERT_A_INFO | awk '{print $1}'); SSL_A_KEY=$(echo $CERT_A_INFO | awk '{print $2}')
     fi
 
-    echo -e "${YELLOW}同步 404 自定义页面...${NC}"
-    mkdir -p "$HTML_DIR"
-    curl -sLo "$HTML_FILE" "$GITHUB_HTML_URL"
-    chown -R www-data:www-data "$HTML_DIR"
+    # 3. 证书处理 (Domain B)
+    echo -e "${CYAN}正在处理域名 B 证书...${NC}"
+    CERT_B_INFO=$(check_cert "$DOMAIN_B" || true)
+    if [[ -z "$CERT_B_INFO" ]]; then
+        [[ -z "$CF_Token" ]] && read -p "请输入 CF API Token: " CF_Token
+        export CF_Token="$CF_Token"
+        "$HOME/.acme.sh/acme.sh" --issue --dns dns_cf -d "$DOMAIN_B" --force
+        mkdir -p "$SSL_DIR/$DOMAIN_B"
+        "$HOME/.acme.sh/acme.sh" --install-cert -d "$DOMAIN_B" --key-file "$SSL_DIR/$DOMAIN_B/privkey.pem" --fullchain-file "$SSL_DIR/$DOMAIN_B/fullchain.pem"
+        SSL_B_FULL="$SSL_DIR/$DOMAIN_B/fullchain.pem"; SSL_B_KEY="$SSL_DIR/$DOMAIN_B/privkey.pem"
+    else
+        SSL_B_FULL=$(echo $CERT_B_INFO | awk '{print $1}'); SSL_B_KEY=$(echo $CERT_B_INFO | awk '{print $2}')
+    fi
 
-    echo -e "${YELLOW}生成增强版 Nginx 动态反代配置...${NC}"
-    cat > "$CONF_TARGET" << 'EOF'
-map $http_upgrade $connection_upgrade {
+    # 4. 获取自定义 404
+    mkdir -p "$HTML_DIR"
+    curl -sLo "$HTML_FILE" "$GITHUB_HTML_URL" || echo -e "${RED}404 页面同步失败${NC}"
+
+    # 5. 生成 Nginx 全局 Map
+    cat > "$CONF_TARGET" << EOF
+map \$http_upgrade \$connection_upgrade {
     default upgrade;
     ''      close;
 }
-
-map $http_user_agent $is_emby_client {
+map \$http_user_agent \$is_emby_client {
     default 0;
     "~*(Hills|yamby|Afuse|Capy|Fileball|Infuse|SenPlayer|VLC|VidHub|Emby|Android|iOS)" 1;
 }
+EOF
 
+    # 6. 注入 Domain A (原有代码，逻辑一字不差)
+    cat >> "$CONF_TARGET" << EOF
 server {
     listen 80;
     listen 443 ssl http2;
     listen 40889 ssl http2;
-    
-    server_name {{DOMAIN}};
-
-    ssl_certificate {{CERT}};
-    ssl_certificate_key {{KEY}};
-
+    server_name $DOMAIN_A;
+    ssl_certificate $SSL_A_FULL;
+    ssl_certificate_key $SSL_A_KEY;
     merge_slashes off;
     resolver 1.1.1.1 8.8.8.8 ipv6=off valid=300s;
     resolver_timeout 5s;
-
     error_page 404 /emby-404.html;
+    location = /emby-404.html { root $HTML_DIR; internal; }
 
-    location = /emby-404.html {
-        root {{HTML_ROOT}};
-        internal;
-    }
-
+    # [原有正则逻辑开始]
     location ~* "^/(?<raw_proto>https?|wss?)://(?<raw_target>[a-zA-Z0-9\.-]+)(?:[:/_](?<raw_port>\d+))?(?<raw_path>/.*)?$" {
-        
-        if ($is_emby_client = 0) { return 403 "Unauthorized Client"; }
-
-        set $target_proto $raw_proto;
-        set $target_port "";
-        if ($raw_port != "") { set $target_port ":$raw_port"; }
-        set $final_path $raw_path;
-        if ($final_path = "") { set $final_path "/"; }
-
-        proxy_pass $target_proto://$raw_target$target_port$final_path$is_args$args;
-
+        if (\$is_emby_client = 0) { return 403 "Unauthorized Client"; }
+        set \$target_proto \$raw_proto;
+        set \$target_port "";
+        if (\$raw_port != "") { set \$target_port ":\$raw_port"; }
+        set \$final_path \$raw_path;
+        if (\$final_path = "") { set \$final_path "/"; }
+        proxy_pass \$target_proto://\$raw_target\$target_port\$final_path\$is_args\$args;
         proxy_set_header Accept-Encoding ""; 
         sub_filter_types *;
         sub_filter_once off;
-        
-        sub_filter ':"http' ':"$scheme://$http_host/http';
-        sub_filter '\"http' '\"$scheme://$http_host/http';
-        sub_filter 'http\:\/\/' '$scheme\:\/\/$http_host\/http\:\/\/';
-        sub_filter 'https\:\/\/' '$scheme\:\/\/$http_host\/https\:\/\/';
-
-        proxy_redirect ~*^https?://(?<re_host>[^/]+)(?<re_path>.*)$ $scheme://$http_host/https://$re_host$re_path;
-
+        sub_filter ':"http' ':"\$scheme://\$http_host/http';
+        sub_filter '\"http' '\"\$scheme://\$http_host/http';
+        sub_filter 'http\:\/\/' '\$scheme\:\/\/\$http_host\/http\:\/\/';
+        sub_filter 'https\:\/\/' '\$scheme\:\/\/\$http_host\/https\:\/\/';
+        proxy_redirect ~*^https?://(?<re_host>[^/]+)(?<re_path>.*)$ \$scheme://\$http_host/https://\$re_host\$re_path;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-        proxy_set_header Host $raw_target;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$raw_target;
         proxy_ssl_server_name on;
-        proxy_ssl_name $raw_target;
+        proxy_ssl_name \$raw_target;
         proxy_ssl_verify off;
-
         proxy_hide_header 'Access-Control-Allow-Origin';
         proxy_hide_header 'Access-Control-Allow-Methods';
         proxy_hide_header 'Access-Control-Allow-Headers';
@@ -172,56 +145,89 @@ server {
         add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, RANGE' always;
         add_header 'Access-Control-Allow-Headers' '*' always;
         add_header 'Access-Control-Expose-Headers' 'Content-Length, Content-Range' always;
-
-        if ($request_method = 'OPTIONS') { 
+        if (\$request_method = 'OPTIONS') { 
             add_header 'Access-Control-Max-Age' 1728000;
             add_header 'Content-Type' 'text/plain; charset=utf-8';
             add_header 'Content-Length' 0;
             return 204; 
         }
-
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_set_header X-Accel-Buffering no;
         proxy_force_ranges on;
     }
-
-    location / {
-        return 404;
-    }
+    location / { return 404; }
 }
 EOF
 
-    sed -i "s|{{DOMAIN}}|$DOMAIN|g" "$CONF_TARGET"
-    sed -i "s|{{CERT}}|$SSL_FULLCHAIN|g" "$CONF_TARGET"
-    sed -i "s|{{KEY}}|$SSL_KEY|g" "$CONF_TARGET"
-    sed -i "s|{{HTML_ROOT}}|$HTML_DIR|g" "$CONF_TARGET"
+    # 7. 注入 Domain B (单站分发逻辑)
+    cat >> "$CONF_TARGET" << EOF
+server {
+    listen 80;
+    listen 443 ssl http2;
+    server_name $DOMAIN_B;
+    ssl_certificate $SSL_B_FULL;
+    ssl_certificate_key $SSL_B_KEY;
+    merge_slashes off;
+    resolver 1.1.1.1 8.8.8.8 ipv6=off valid=300s;
+    resolver_timeout 5s;
+    error_page 404 /emby-404.html;
+    location = /emby-404.html { root $HTML_DIR; internal; }
+EOF
 
+    # 循环收集 Domain B 的路径
+    while true; do
+        read -p "是否为 Domain B 添加单站路径映射? (y/n): " ADD_PATH
+        [[ "$ADD_PATH" != "y" ]] && break
+        read -p "  路径名 (如 path1): " P_NAME
+        read -p "  目标 Emby 地址 (如 emby1.com): " P_TARGET
+        cat >> "$CONF_TARGET" << EOF
+    location ^~ /$P_NAME/ {
+        proxy_pass https://$P_TARGET:443/;
+        proxy_set_header Host $P_TARGET;
+        proxy_ssl_name $P_TARGET;
+        proxy_ssl_server_name on;
+        proxy_ssl_verify off;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_hide_header 'Access-Control-Allow-Origin';
+        add_header 'Access-Control-Allow-Origin' '*' always;
+        add_header 'Access-Control-Allow-Methods' '*' always;
+        add_header 'Access-Control-Allow-Headers' '*' always;
+        add_header 'Access-Control-Expose-Headers' 'Content-Length, Content-Range' always;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_force_ranges on;
+    }
+EOF
+    done
+
+    # 闭合 Domain B
+    cat >> "$CONF_TARGET" << EOF
+    location / { return 404; }
+}
+EOF
+
+    # 8. 完成部署
     if nginx -t; then
         systemctl restart nginx
-        echo -e "------------------------------------------------"
         echo -e "${GREEN}部署成功!${NC}"
-        echo -e "代理域名: ${CYAN}https://$DOMAIN:port${NC}"
-        echo -e "------------------------------------------------"
+        echo -e "万能反代: https://$DOMAIN_A:40889/https://..."
+        echo -e "单站反代: https://$DOMAIN_B/路径名/"
     else
-        echo -e "${RED}配置有误，请检查日志${NC}"
+        echo -e "${RED}Nginx 测试失败，请检查配置。${NC}"
         exit 1
     fi
 }
 
-# --- 主入口 ---
+# --- 执行选择 ---
 clear
-echo -e "${CYAN}====================================${NC}"
-echo -e "${CYAN}   Emby 万能动态反代自动化脚本      ${NC}"
-echo -e "${CYAN}====================================${NC}"
-echo -e "1) 安装/更新 反代配置"
-echo -e "2) 彻底卸载 反代配置与目录"
-echo -e "q) 退出"
-read -p "请选择操作 [1-2/q]: " MAIN_CHOICE
-
-case $MAIN_CHOICE in
+echo "1) 安装/更新 (双域名共存模式)"
+echo "2) 彻底卸载"
+read -p "选择操作: " OPT
+case $OPT in
     1) install_emby_pro ;;
     2) uninstall_emby ;;
-    q) exit 0 ;;
-    *) echo -e "${RED}输入错误${NC}" ; exit 1 ;;
+    *) exit 0 ;;
 esac
