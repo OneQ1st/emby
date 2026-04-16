@@ -181,7 +181,7 @@ server {
         # --- end ---
         proxy_set_header X-Accel-Buffering no;
         proxy_force_ranges on;
-        proxy_set_header Range $http_range; # 新补充
+        proxy_set_header Range \$http_range; # 新补充
     }
     location / { return 404; }
 }
