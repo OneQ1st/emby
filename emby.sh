@@ -60,7 +60,6 @@ init_env() {
     apt update && apt install -y nginx-full curl openssl sed socat cron
     mkdir -p "$HTML_DIR"
     [[ ! -f "$HTML_FILE" ]] && curl -sLo "$HTML_FILE" "$GITHUB_HTML_URL"
-    # 生成全局 Map 防止重复
     cat > "$MAP_CONF" << EOF
 map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
 map \$http_user_agent \$is_emby_client {
@@ -70,7 +69,7 @@ map \$http_user_agent \$is_emby_client {
 EOF
 }
 
-# --- 1. 配置通用万能反代 ---
+# --- 1. 万能反代 (核心代码一字不动) ---
 deploy_universal() {
     init_env
     read -p "请输入万能反代域名: " D_UNI
@@ -139,7 +138,7 @@ EOF
     nginx -t && systemctl restart nginx && echo -e "${GREEN}万能反代部署完成！${NC}"
 }
 
-# --- 2. 配置单站路径反代 ---
+# --- 2. 单站反代 (支持完整 URL 解析) ---
 deploy_single() {
     init_env
     read -p "请输入单站反代域名: " D_SIN
@@ -164,12 +163,24 @@ EOF
         read -p "添加映射路径? (y/n): " YN
         [[ "$YN" != "y" ]] && break
         read -p "  路径后缀 (如 path1): " P_NAME
-        read -p "  目标域名 (如 emby1.com): " P_TARGET
+        read -p "  完整目标地址 (如 http://1.2.3.4:8096): " P_FULL_URL
+        
+        # --- 解析逻辑 ---
+        # 提取协议 (默认 https)
+        P_PROTO=$(echo $P_FULL_URL | grep :// | sed -e 's|://.*||')
+        [[ -z "$P_PROTO" ]] && P_PROTO="https"
+        
+        # 提取主机部分 (域名+端口)
+        P_HOST=$(echo $P_FULL_URL | sed -e 's|^.*://||' -e 's|/.*||')
+        
+        # 清洗 Host 用于 Header (去掉端口)
+        P_PURE_HOST=$(echo $P_HOST | cut -d: -f1)
+
         cat >> "$TARGET_CONF" << EOF
     location ^~ /$P_NAME/ {
-        proxy_pass https://$P_TARGET:443/;
-        proxy_set_header Host $P_TARGET;
-        proxy_ssl_name $P_TARGET;
+        proxy_pass $P_PROTO://$P_HOST/;
+        proxy_set_header Host $P_PURE_HOST;
+        proxy_ssl_name $P_PURE_HOST;
         proxy_ssl_server_name on;
         proxy_ssl_verify off;
         proxy_http_version 1.1;
@@ -191,24 +202,20 @@ EOF
     nginx -t && systemctl restart nginx && echo -e "${GREEN}单站反代部署完成！${NC}"
 }
 
-# --- 3. 彻底卸载 ---
+# --- 3. 卸载 ---
 uninstall_all() {
     rm -f /etc/nginx/conf.d/emby_*.conf
     rm -rf "$HTML_DIR"
     systemctl restart nginx
-    echo -e "${YELLOW}所有 Emby 反代配置已清理。${NC}"
+    echo -e "${YELLOW}已清理所有配置。${NC}"
 }
 
 # --- 主菜单 ---
 clear
-echo -e "${CYAN}==================================${NC}"
-echo -e "      Emby 反代互动管理脚本"
-echo -e "${CYAN}==================================${NC}"
-echo "1) 部署/更新 [万能动态反代] (Domain A)"
-echo "2) 部署/更新 [单站路径反代] (Domain B)"
-echo "3) 彻底卸载所有配置"
-echo "q) 退出"
-read -p "请选择操作: " OPT
+echo "1) 部署 [万能动态反代]"
+echo "2) 部署 [单站路径反代] (支持 HTTP/HTTPS 完整地址)"
+echo "3) 卸载"
+read -p "选择: " OPT
 case $OPT in
     1) deploy_universal ;;
     2) deploy_single ;;
