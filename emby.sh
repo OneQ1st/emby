@@ -160,9 +160,9 @@ server {
         proxy_ssl_server_name on;
         proxy_ssl_name \$raw_target;
         # --- 转发真实IP ---
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
         # --- End ---
         proxy_ssl_verify off;
         proxy_hide_header 'Access-Control-Allow-Origin';
