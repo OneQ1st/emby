@@ -17,27 +17,48 @@ NC='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${RED}请使用 root 权限运行${NC}" && exit 1
 
-# --- 环境初始化 ---
-init_env() {
-    apt update && apt install -y nginx-full curl openssl sed socat cron
-    mkdir -p "$HTML_DIR"
-    mkdir -p "$SSL_DIR"
-    [[ ! -f "$HTML_FILE" ]] && curl -sLo "$HTML_FILE" "$GITHUB_HTML_URL"
-    cat > "$MAP_CONF" << EOF
-map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
-map \$http_user_agent \$is_emby_client {
-    default 0;
-    "~*(Hills|yamby|Afuse|Capy|Fileball|Infuse|SenPlayer|VLC|VidHub|Emby|Android|iOS)" 1;
-}
-EOF
+# --- 证书检索功能 ---
+find_existing_cert() {
+    local d=$1
+    # 搜索优先级: 1. 本脚本自定义目录 2. acme.sh 默认目录 3. certbot 默认目录
+    local paths=(
+        "$SSL_DIR/$d/fullchain.pem"
+        "$HOME/.acme.sh/${d}_ecc/fullchain.cer"
+        "/etc/letsencrypt/live/$d/fullchain.pem"
+    )
+    local keys=(
+        "$SSL_DIR/$d/privkey.pem"
+        "$HOME/.acme.sh/${d}_ecc/${d}.key"
+        "/etc/letsencrypt/live/$d/privkey.pem"
+    )
+
+    for i in "${!paths[@]}"; do
+        if [[ -f "${paths[$i]}" && -f "${keys[$i]}" ]]; then
+            echo "${paths[$i]} ${keys[$i]}"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # --- 证书申请逻辑 ---
 handle_ssl() {
     local DOMAIN=$1
+    echo -e "${CYAN}正在检查本地是否存在域名 $DOMAIN 的证书...${NC}"
+    
+    local EXIST_CERT=$(find_existing_cert "$DOMAIN" || true)
+    
+    if [[ -n "$EXIST_CERT" ]]; then
+        CUR_FULL=$(echo $EXIST_CERT | awk '{print $1}')
+        CUR_KEY=$(echo $EXIST_CERT | awk '{print $2}')
+        echo -e "${GREEN}检测到现有证书:${NC}\nCert: $CUR_FULL\nKey: $CUR_KEY"
+        read -p "是否直接使用现有证书? [Y/n]: " USE_EXIST
+        [[ "${USE_EXIST,,}" != "n" ]] && return 0
+    fi
+
     echo -e "${CYAN}选择证书申请方式:${NC}"
-    echo "1) HTTP 模式 (需要 80 或自定义端口开放)"
-    echo "2) Cloudflare DNS 模式 (需要 API Token)"
+    echo "1) HTTP 模式 (可自定义端口，需防火墙放行)"
+    echo "2) Cloudflare DNS 模式 (需 API Token)"
     read -p "选择 [1-2]: " SSL_MODE
 
     [[ ! -f "$HOME/.acme.sh/acme.sh" ]] && curl https://get.acme.sh | sh -s email=admin@$DOMAIN
@@ -61,22 +82,36 @@ handle_ssl() {
     CUR_KEY="$SSL_DIR/$DOMAIN/privkey.pem"
 }
 
-# --- 域名冲突/存在性检查 ---
+# --- 环境初始化 ---
+init_env() {
+    apt update && apt install -y nginx-full curl openssl sed socat cron
+    mkdir -p "$HTML_DIR"
+    mkdir -p "$SSL_DIR"
+    [[ ! -f "$HTML_FILE" ]] && curl -sLo "$HTML_FILE" "$GITHUB_HTML_URL"
+    cat > "$MAP_CONF" << EOF
+map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
+map \$http_user_agent \$is_emby_client {
+    default 0;
+    "~*(Hills|yamby|Afuse|Capy|Fileball|Infuse|SenPlayer|VLC|VidHub|Emby|Android|iOS)" 1;
+}
+EOF
+}
+
+# --- 域名配置冲突检查 ---
 check_domain_exists() {
     local DOMAIN=$1
     local SEARCH=$(grep -l "server_name .*$DOMAIN" /etc/nginx/conf.d/*.conf 2>/dev/null || true)
     
     if [[ -n "$SEARCH" ]]; then
-        echo -e "${YELLOW}警告: 域名 $DOMAIN 已在以下配置文件中定义:${NC}"
-        echo "$SEARCH"
-        echo "1) 覆盖现有配置"
-        echo "2) 仅进入路径管理 (仅限单站模式)"
-        echo "3) 取消并退出"
-        read -p "请选择 [1-3]: " EXIST_OPT
+        echo -e "${YELLOW}提醒: 域名 $DOMAIN 已在配置中定义: $SEARCH${NC}"
+        echo "1) 覆盖并重新生成配置"
+        echo "2) 进入路径管理 (仅限单站模式)"
+        echo "3) 取消"
+        read -p "选择 [1-3]: " EXIST_OPT
         case $EXIST_OPT in
-            1) return 0 ;; # 覆盖
-            2) return 2 ;; # 仅管理路径
-            *) return 1 ;; # 退出
+            1) return 0 ;; 
+            2) return 2 ;; 
+            *) return 1 ;; 
         esac
     fi
     return 0
@@ -86,11 +121,9 @@ check_domain_exists() {
 deploy_universal() {
     read -p "请输入万能反代域名: " D_UNI
     [[ -z "$D_UNI" ]] && return
-    
     check_domain_exists "$D_UNI" || return
     init_env
     handle_ssl "$D_UNI"
-
     local TARGET_CONF="/etc/nginx/conf.d/emby_universal.conf"
     cat > "$TARGET_CONF" << EOF
 server {
@@ -148,14 +181,11 @@ EOF
 deploy_single() {
     read -p "请输入单站反代域名: " D_SIN
     [[ -z "$D_SIN" ]] && return
-    
     local TARGET_CONF="/etc/nginx/conf.d/emby_single.conf"
     check_domain_exists "$D_SIN"
     local RET=$?
     [[ $RET -eq 1 ]] && return
-
     init_env
-    # 只有在需要覆盖或新部署时才申办证书
     if [[ $RET -eq 0 ]]; then
         handle_ssl "$D_SIN"
         cat > "$TARGET_CONF" << EOF
@@ -175,7 +205,7 @@ EOF
     fi
 
     while true; do
-        echo -e "\n${CYAN}当前域名: $D_SIN${NC}"
+        echo -e "\n${CYAN}当前管理域名: $D_SIN${NC}"
         echo -e "${CYAN}当前已配置路径：${NC}"
         grep "location \^~ /" "$TARGET_CONF" | cut -d'/' -f2 | sed 's/\\//g' || echo "无"
         
@@ -183,26 +213,18 @@ EOF
         [[ "$P_NAME" == "q" ]] && break
         
         if grep -q "location \^~ /$P_NAME/" "$TARGET_CONF"; then
-            echo -e "${YELLOW}检测到路径 /$P_NAME/ 已存在。${NC}"
-            echo "1) 修改/覆盖地址"
-            echo "2) 删除该路径"
-            echo "3) 重命名路径"
-            echo "4) 取消"
-            read -p "请选择: " P_OPT
+            echo -e "${YELLOW}路径 /$P_NAME/ 已存在。${NC}"
+            echo "1) 覆盖后端 2) 删除路径 3) 重构路径名 4) 取消"
+            read -p "选择: " P_OPT
             case $P_OPT in
-                2)
-                    sed -i "/location \^~ \/$P_NAME\//,/}/d" "$TARGET_CONF"
-                    echo -e "${RED}已删除路径 /$P_NAME/${NC}"; nginx -s reload; continue ;;
-                3)
-                    read -p "请输入新的路径名: " NEW_P_NAME
-                    sed -i "s|location ^~ /$P_NAME/|location ^~ /$NEW_P_NAME/|g" "$TARGET_CONF"
-                    echo -e "${GREEN}路径已由 /$P_NAME/ 重命名为 /$NEW_P_NAME/${NC}"; nginx -s reload; continue ;;
+                2) sed -i "/location \^~ \/$P_NAME\//,/}/d" "$TARGET_CONF"; echo "已删除"; nginx -s reload; continue ;;
+                3) read -p "新路径名: " NEW_P_NAME; sed -i "s|location ^~ /$P_NAME/|location ^~ /$NEW_P_NAME/|g" "$TARGET_CONF"; nginx -s reload; continue ;;
                 4) continue ;;
             esac
             sed -i "/location \^~ \/$P_NAME\//,/}/d" "$TARGET_CONF"
         fi
 
-        read -p "完整目标地址 (http://...): " P_FULL_URL
+        read -p "目标地址 (http://...): " P_FULL_URL
         [[ -z "$P_FULL_URL" ]] && continue
         P_PROTO=$(echo $P_FULL_URL | grep :// | sed -e 's|://.*||'); [[ -z "$P_PROTO" ]] && P_PROTO="https"
         P_HOST=$(echo $P_FULL_URL | sed -e 's|^.*://||' -e 's|/.*||')
@@ -232,36 +254,24 @@ EOF
         sed -i "/location \/ {/i \\" "$TARGET_CONF"
         sed -i "/location \/ {/e cat $TMP_BLOCK" "$TARGET_CONF"
         rm -f "$TMP_BLOCK"
-        echo -e "${GREEN}路径 /$P_NAME/ 处理成功！${NC}"
+        echo -e "${GREEN}路径 /$P_NAME/ 配置已更新${NC}"
         nginx -t && nginx -s reload
     done
-}
-
-# --- 3. 卸载 ---
-uninstall_all() {
-    echo -e "${RED}确认卸载所有 Emby Nginx 配置？(y/n)${NC}"
-    read -p "> " CONFIRM
-    [[ "$CONFIRM" != "y" ]] && return
-    rm -f /etc/nginx/conf.d/emby_*.conf
-    rm -rf "$HTML_DIR"
-    systemctl restart nginx
-    echo -e "${YELLOW}清理完成。${NC}"
 }
 
 # --- 菜单 ---
 while true; do
     clear
-    echo -e "${CYAN}--- Emby Nginx Gateway 管理脚本 ---${NC}"
+    echo -e "${CYAN}--- Emby Nginx Gateway Manager ---${NC}"
     echo "1) 部署 [万能动态反代]"
-    echo "2) 部署/管理 [单站路径反代] (支持增删改查)"
+    echo "2) 部署/管理 [单站路径反代] (增删改)"
     echo "3) 卸载全部配置"
     echo "q) 退出"
     read -p "选择: " OPT
     case $OPT in
         1) deploy_universal ;;
         2) deploy_single ;;
-        3) uninstall_all ;;
+        3) rm -f /etc/nginx/conf.d/emby_*.conf; systemctl restart nginx; echo "已清理" ;;
         q) exit 0 ;;
-        *) echo "无效选项" ; sleep 1 ;;
     esac
 done
