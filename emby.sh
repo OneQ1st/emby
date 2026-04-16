@@ -17,7 +17,7 @@ NC='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${RED}请使用 root 权限运行${NC}" && exit 1
 
-# --- 证书检查函数 ---
+# --- 证书与环境初始化 (同前，略作整合) ---
 check_cert() {
     local d=$1
     local p1="$HOME/.acme.sh/${d}_ecc/fullchain.cer"
@@ -29,33 +29,21 @@ check_cert() {
     return 1
 }
 
-# --- 证书申请流程 ---
 handle_ssl() {
     local DOMAIN=$1
     CERT_INFO=$(check_cert "$DOMAIN" || true)
     if [[ -z "$CERT_INFO" ]]; then
-        echo -e "${YELLOW}未发现 $DOMAIN 的证书，开始申请...${NC}"
-        echo "1) 独立模式 (Standalone - 占用80端口)"
-        echo "2) Cloudflare Token 模式 (DNS验证)"
-        read -p "选择 [1/2]: " SSL_MODE
+        echo -e "${YELLOW}申请证书中...${NC}"
         [[ ! -f "$HOME/.acme.sh/acme.sh" ]] && curl https://get.acme.sh | sh -s email=admin@$DOMAIN
-        if [[ "$SSL_MODE" == "2" ]]; then
-            [[ -z "$CF_Token" ]] && read -p "请输入 CF API Token: " CF_Token
-            export CF_Token="$CF_Token"
-            "$HOME/.acme.sh/acme.sh" --issue --dns dns_cf -d "$DOMAIN" --force
-        else
-            "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$DOMAIN" --force
-        fi
+        "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$DOMAIN" --force
         mkdir -p "$SSL_DIR/$DOMAIN"
         "$HOME/.acme.sh/acme.sh" --install-cert -d "$DOMAIN" --key-file "$SSL_DIR/$DOMAIN/privkey.pem" --fullchain-file "$SSL_DIR/$DOMAIN/fullchain.pem"
         CUR_FULL="$SSL_DIR/$DOMAIN/fullchain.pem"; CUR_KEY="$SSL_DIR/$DOMAIN/privkey.pem"
     else
-        echo -e "${GREEN}检测到 $DOMAIN 已存在证书。${NC}"
         CUR_FULL=$(echo $CERT_INFO | awk '{print $1}'); CUR_KEY=$(echo $CERT_INFO | awk '{print $2}')
     fi
 }
 
-# --- 初始化环境 ---
 init_env() {
     apt update && apt install -y nginx-full curl openssl sed socat cron
     mkdir -p "$HTML_DIR"
@@ -69,13 +57,12 @@ map \$http_user_agent \$is_emby_client {
 EOF
 }
 
-# --- 1. 万能反代 (核心代码完整审查) ---
+# --- 1. 万能反代 ---
 deploy_universal() {
     init_env
     read -p "请输入万能反代域名: " D_UNI
     [[ -z "$D_UNI" ]] && return
     handle_ssl "$D_UNI"
-    
     local TARGET_CONF="/etc/nginx/conf.d/emby_universal.conf"
     cat > "$TARGET_CONF" << EOF
 server {
@@ -87,12 +74,10 @@ server {
     ssl_certificate_key $CUR_KEY;
     merge_slashes off;
     resolver 1.1.1.1 8.8.8.8 ipv6=off valid=300s;
-    resolver_timeout 5s;
     error_page 404 /emby-404.html;
     location = /emby-404.html { root $HTML_DIR; internal; }
-
     location ~* "^/(?<raw_proto>https?|wss?)://(?<raw_target>[a-zA-Z0-9\.-]+)(?:[:/_](?<raw_port>\d+))?(?<raw_path>/.*)?$" {
-        if (\$is_emby_client = 0) { return 403 "Unauthorized Client"; }
+        if (\$is_emby_client = 0) { return 403; }
         set \$target_proto \$raw_proto;
         set \$target_port "";
         if (\$raw_port != "") { set \$target_port ":\$raw_port"; }
@@ -115,18 +100,11 @@ server {
         proxy_ssl_name \$raw_target;
         proxy_ssl_verify off;
         proxy_hide_header 'Access-Control-Allow-Origin';
-        proxy_hide_header 'Access-Control-Allow-Methods';
-        proxy_hide_header 'Access-Control-Allow-Headers';
         add_header 'Access-Control-Allow-Origin' '*' always;
         add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, RANGE' always;
         add_header 'Access-Control-Allow-Headers' '*' always;
         add_header 'Access-Control-Expose-Headers' 'Content-Length, Content-Range' always;
-        if (\$request_method = 'OPTIONS') { 
-            add_header 'Access-Control-Max-Age' 1728000;
-            add_header 'Content-Type' 'text/plain; charset=utf-8';
-            add_header 'Content-Length' 0;
-            return 204; 
-        }
+        if (\$request_method = 'OPTIONS') { return 204; }
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_set_header X-Accel-Buffering no;
@@ -138,15 +116,13 @@ EOF
     nginx -t && systemctl restart nginx && echo -e "${GREEN}万能反代部署完成！${NC}"
 }
 
-# --- 2. 单站反代 (支持交互式修改/删除路径) ---
+# --- 2. 单站反代 (增强版) ---
 deploy_single() {
     init_env
     read -p "请输入单站反代域名: " D_SIN
     [[ -z "$D_SIN" ]] && return
-    
     local TARGET_CONF="/etc/nginx/conf.d/emby_single.conf"
-    
-    # 如果文件不存在，则初始化 server 块
+
     if [[ ! -f "$TARGET_CONF" ]]; then
         handle_ssl "$D_SIN"
         cat > "$TARGET_CONF" << EOF
@@ -167,68 +143,75 @@ EOF
 
     while true; do
         echo -e "\n${CYAN}当前已配置路径：${NC}"
-        grep "location ^~ /" "$TARGET_CONF" | cut -d'/' -f2 || echo "无"
+        grep "location ^~ /" "$TARGET_CONF" | cut -d'/' -f2 | sed 's/\\//g' || echo "无"
         
-        read -p "请输入要操作的路径后缀 (如 path1, 输入 q 退出): " P_NAME
+        read -p "请输入操作路径 (如 emos, q 退出): " P_NAME
         [[ "$P_NAME" == "q" ]] && break
         
-        # 检查路径是否存在
+        # 路径存在时的处理
         if grep -q "location ^~ /$P_NAME/" "$TARGET_CONF"; then
-            echo -e "${YELLOW}路径 /$P_NAME/ 已存在。${NC}"
-            echo "1) 修改/覆盖"
+            echo -e "${YELLOW}检测到路径 /$P_NAME/ 已存在。${NC}"
+            echo "1) 覆盖后端地址"
             echo "2) 删除该路径"
-            echo "3) 取消"
+            echo "3) 修改路径名 (重命名)"
+            echo "4) 取消"
             read -p "请选择: " P_OPT
             case $P_OPT in
                 2)
-                    # 使用 sed 删除 location 块（匹配到下一个 } 结束）
                     sed -i "/location \^~ \/$P_NAME\//,/}/d" "$TARGET_CONF"
-                    echo -e "${RED}已删除路径 /$P_NAME/ ${NC}"
-                    continue ;;
-                3) continue ;;
+                    echo -e "${RED}已删除路径 /$P_NAME/${NC}"; continue ;;
+                3)
+                    read -p "请输入新的路径名: " NEW_P_NAME
+                    sed -i "s|location ^~ /$P_NAME/|location ^~ /$NEW_P_NAME/|g" "$TARGET_CONF"
+                    echo -e "${GREEN}路径已由 /$P_NAME/ 重命名为 /$NEW_P_NAME/${NC}"; continue ;;
+                4) continue ;;
             esac
-            # 如果选 1，则先删除旧的再添加新的
+            # 选1则先清理旧块
             sed -i "/location \^~ \/$P_NAME\//,/}/d" "$TARGET_CONF"
         fi
 
-        # 添加/覆盖逻辑
-        read -p "  完整目标地址 (如 http://1.2.3.4:8096): " P_FULL_URL
+        # 新增/覆盖逻辑
+        read -p "完整目标地址 (http://...): " P_FULL_URL
         P_PROTO=$(echo $P_FULL_URL | grep :// | sed -e 's|://.*||'); [[ -z "$P_PROTO" ]] && P_PROTO="https"
         P_HOST=$(echo $P_FULL_URL | sed -e 's|^.*://||' -e 's|/.*||')
         P_PURE_HOST=$(echo $P_HOST | cut -d: -f1)
 
-        # 在最后一个 } 之前插入新配置
-        sed -i '$i \
-    location ^~ /'"$P_NAME"'\/ { \
-        proxy_pass '"$P_PROTO"':\/\/'"$P_HOST"'/; \
-        # --- emos 头部要求 ---
-        proxy_set_header EMOS-PROXY-ID "7137365927"; \
-        proxy_set_header EMOS-PROXY-NAME "@OneQ1st"; \
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; \
-        proxy_set_header Range $http_range; \
-        proxy_set_header If-Range $http_if_range; \
+        # 构建临时文件避免 sed 转义地狱
+        TMP_BLOCK=$(mktemp)
+        cat > "$TMP_BLOCK" << EOF
+    location ^~ /$P_NAME/ {
+        proxy_pass $P_PROTO://$P_HOST/;
+        # --- emos ---
+        proxy_set_header EMOS-PROXY-ID "7137365927";
+        proxy_set_header EMOS-PROXY-NAME "@OneQ1st";
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header Range \$http_range;
+        proxy_set_header If-Range \$http_if_range;
         # --- End ---
-        proxy_set_header Host '"$P_PURE_HOST"'; \
-        proxy_ssl_name '"$P_PURE_HOST"'; \
-        proxy_ssl_server_name on; \
-        proxy_ssl_verify off; \
-        proxy_http_version 1.1; \
-        proxy_set_header Upgrade $http_upgrade; \
-        proxy_set_header Connection $connection_upgrade; \
-        proxy_hide_header "Access-Control-Allow-Origin"; \
-        add_header "Access-Control-Allow-Origin" "*" always; \
-        add_header "Access-Control-Allow-Methods" "*" always; \
-        add_header "Access-Control-Allow-Headers" "*" always; \
-        add_header "Access-Control-Expose-Headers" "Content-Length, Content-Range" always; \
-        proxy_buffering off; \
-        proxy_request_buffering off; \
-        proxy_force_ranges on; \ # 206状态支持,一般默认开启
-    }' "$TARGET_CONF"
-        
-        echo -e "${GREEN}路径 /$P_NAME/ 配置成功。${NC}"
+        proxy_set_header Host $P_PURE_HOST;
+        proxy_ssl_name $P_PURE_HOST;
+        proxy_ssl_server_name on;
+        proxy_ssl_verify off;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_hide_header 'Access-Control-Allow-Origin';
+        add_header 'Access-Control-Allow-Origin' '*' always;
+        add_header 'Access-Control-Allow-Methods' '*' always;
+        add_header 'Access-Control-Allow-Headers' '*' always;
+        add_header 'Access-Control-Expose-Headers' 'Content-Length, Content-Range' always;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_force_ranges on;  # 206状态支持 一般默认开启
+    }
+EOF
+        # 在倒数第二行（即 location / { ... } 之前）插入
+        sed -i "/location \/ {/i \\" "$TARGET_CONF"
+        sed -i "/location \/ {/e cat $TMP_BLOCK" "$TARGET_CONF"
+        rm -f "$TMP_BLOCK"
+        echo -e "${GREEN}路径 /$P_NAME/ 配置成功！${NC}"
     done
-
-    nginx -t && systemctl restart nginx && echo -e "${GREEN}所有单站反代配置已生效！${NC}"
+    nginx -t && systemctl restart nginx
 }
 
 # --- 3. 卸载 ---
@@ -236,18 +219,14 @@ uninstall_all() {
     rm -f /etc/nginx/conf.d/emby_*.conf
     rm -rf "$HTML_DIR"
     systemctl restart nginx
-    echo -e "${YELLOW}已清理所有配置。${NC}"
+    echo -e "${YELLOW}清理完成。${NC}"
 }
 
-# --- 主菜单 ---
+# --- 菜单 ---
 clear
-echo -e "${CYAN}==================================${NC}"
-echo -e "      Emby 反代 终极管理脚本"
-echo -e "${CYAN}==================================${NC}"
-echo "1) 部署 [万能动态反代] (代码完整审查)"
-echo "2) 部署 [单站路径反代] (支持修改/删除/覆盖)"
-echo "3) 彻底卸载"
-echo "q) 退出"
+echo "1) 部署 [万能动态反代]"
+echo "2) 部署 [单站路径反代] (支持修改/重命名/删除)"
+echo "3) 卸载"
 read -p "选择: " OPT
 case $OPT in
     1) deploy_universal ;;
