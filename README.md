@@ -1,3 +1,4 @@
+目前的脚本最稳妥的运行环境依然是：Ubuntu 20.04+ 或 Debian 11+。
 更新环境
 ```
 apt update && apt install -y curl sudo
