@@ -56,21 +56,40 @@ handle_ssl() {
         [[ "${USE_EXIST,,}" != "n" ]] && return 0
     fi
 
-    echo -e "${CYAN}选择证书申请方式:${NC}"
-    echo "1) HTTP 模式 (需放行 80 或自定义端口)"
-    echo "2) Cloudflare DNS 模式 (需 API Token)"
-    read -p "选择 [1-2]: " SSL_MODE
+    # 准备 acme.sh 环境
+    if [[ ! -f "$HOME/.acme.sh/acme.sh" ]]; then
+        read -p "请输入证书通知邮箱 (如 admin@example.com): " USER_EMAIL
+        USER_EMAIL=${USER_EMAIL:-"admin@$DOMAIN"}
+        curl https://get.acme.sh | sh -s email="$USER_EMAIL"
+    fi
 
-    [[ ! -f "$HOME/.acme.sh/acme.sh" ]] && curl https://get.acme.sh | sh -s email=admin@$DOMAIN
+    echo -e "${CYAN}选择证书申请方式:${NC}"
+    echo "1) Webroot 模式 (通过 Nginx 80 端口验证，最稳妥)"
+    echo "2) Cloudflare DNS 模式 (需 API Token，支持通配符)"
+    read -p "选择 [1-2]: " SSL_MODE
 
     if [[ "$SSL_MODE" == "2" ]]; then
         read -p "请输入 Cloudflare API Token: " CF_Token
         export CF_Token="$CF_Token"
         "$HOME/.acme.sh/acme.sh" --issue --dns dns_cf -d "$DOMAIN" --force
     else
-        read -p "请输入 HTTP 验证使用的端口 (默认 80): " HTTP_PORT
-        HTTP_PORT=${HTTP_PORT:-80}
-        "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$DOMAIN" --httpport "$HTTP_PORT" --force
+        echo -e "${YELLOW}确保域名 $DOMAIN 已解析到本服务器，且 80 端口未被防火墙拦截${NC}"
+        # 临时创建验证目录
+        local WEBROOT="/var/www/html"
+        mkdir -p "$WEBROOT"
+        
+        # 临时创建 Nginx 80 端口配置用于验证
+        cat > /etc/nginx/conf.d/temp_auth.conf << EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+    location /.well-known/acme-challenge/ { root $WEBROOT; }
+}
+EOF
+        systemctl reload nginx
+        "$HOME/.acme.sh/acme.sh" --issue -d "$DOMAIN" --webroot "$WEBROOT" --force
+        rm -f /etc/nginx/conf.d/temp_auth.conf
+        systemctl reload nginx
     fi
 
     mkdir -p "$SSL_DIR/$DOMAIN"
@@ -102,7 +121,6 @@ deploy_universal() {
     read -p "请输入万能反代域名: " D_UNI
     [[ -z "$D_UNI" ]] && return
     
-    # 冲突检查
     local SEARCH=$(grep -l "server_name .*$D_UNI" /etc/nginx/conf.d/*.conf 2>/dev/null || true)
     if [[ -n "$SEARCH" ]]; then
         echo -e "${YELLOW}提醒: 域名 $D_UNI 已在配置中定义: $SEARCH${NC}"
@@ -214,7 +232,6 @@ deploy_single() {
 
         local TARGET_CONF="/etc/nginx/conf.d/emby_single_${D_SIN}.conf"
         
-        # 初始化新域名框架
         if [[ ! -f "$TARGET_CONF" ]]; then
             init_env
             handle_ssl "$D_SIN"
@@ -235,7 +252,6 @@ EOF
             nginx -t && systemctl restart nginx
         fi
 
-        # 路径管理内层循环
         while true; do
             clear
             echo -e "${CYAN}--- [$D_SIN] 路径管理 ---${NC}"
@@ -296,6 +312,7 @@ EOF
         tcp_nodelay on;
     }
 EOF
+            # 插入到 location / 前面
             sed -i "/location \/ {/i \\" "$TARGET_CONF"
             sed -i "/location \/ {/e cat $TMP_B" "$TARGET_CONF"
             rm -f "$TMP_B"
