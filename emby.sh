@@ -15,6 +15,7 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# 权限检查
 [[ $EUID -ne 0 ]] && echo -e "${RED}请使用 root 权限运行${NC}" && exit 1
 
 # --- 证书检索功能 ---
@@ -56,7 +57,7 @@ handle_ssl() {
     fi
 
     echo -e "${CYAN}选择证书申请方式:${NC}"
-    echo "1) HTTP 模式 (可自定义端口，需防火墙放行)"
+    echo "1) HTTP 模式 (需放行 80 或自定义端口)"
     echo "2) Cloudflare DNS 模式 (需 API Token)"
     read -p "选择 [1-2]: " SSL_MODE
 
@@ -96,31 +97,19 @@ map \$http_user_agent \$is_emby_client {
 EOF
 }
 
-# --- 域名配置冲突检查 ---
-check_domain_exists() {
-    local DOMAIN=$1
-    local SEARCH=$(grep -l "server_name .*$DOMAIN" /etc/nginx/conf.d/*.conf 2>/dev/null || true)
-    
-    if [[ -n "$SEARCH" ]]; then
-        echo -e "${YELLOW}提醒: 域名 $DOMAIN 已在配置中定义: $SEARCH${NC}"
-        echo "1) 覆盖并重新生成配置"
-        echo "2) 进入路径管理 (仅限单站模式)"
-        echo "3) 取消"
-        read -p "选择 [1-3]: " EXIST_OPT
-        case $EXIST_OPT in
-            1) return 0 ;; 
-            2) return 2 ;; 
-            *) return 1 ;; 
-        esac
-    fi
-    return 0
-}
-
-# --- 1. 万能反代 ---
+# --- 1. 万能反代部署 ---
 deploy_universal() {
     read -p "请输入万能反代域名: " D_UNI
     [[ -z "$D_UNI" ]] && return
-    check_domain_exists "$D_UNI" || return
+    
+    # 冲突检查
+    local SEARCH=$(grep -l "server_name .*$D_UNI" /etc/nginx/conf.d/*.conf 2>/dev/null || true)
+    if [[ -n "$SEARCH" ]]; then
+        echo -e "${YELLOW}提醒: 域名 $D_UNI 已在配置中定义: $SEARCH${NC}"
+        read -p "是否覆盖现有配置并重新生成? [y/N]: " OVR
+        [[ "${OVR,,}" != "y" ]] && return
+    fi
+
     init_env
     handle_ssl "$D_UNI"
     local TARGET_CONF="/etc/nginx/conf.d/emby_universal.conf"
@@ -179,17 +168,16 @@ server {
 }
 EOF
     nginx -t && systemctl restart nginx && echo -e "${GREEN}万能反代部署完成！${NC}"
+    sleep 2
 }
 
-# --- 2. 单站反代 (已完全修复交互逻辑) ---
+# --- 2. 单站路径反代管理 ---
 deploy_single() {
     while true; do
         clear
-        echo -e "${CYAN}--- 单站反代管理 ---${NC}"
-        
-        # 查找现有的单站配置文件
+        echo -e "${CYAN}--- 单站路径反代管理 ---${NC}"
         local conf_files=(/etc/nginx/conf.d/emby_single_*.conf)
-        echo -e "${YELLOW}当前已配置的单站域名:${NC}"
+        echo -e "${YELLOW}当前已配置域名:${NC}"
         if [[ -e "${conf_files[0]}" ]]; then
             for conf in "${conf_files[@]}"; do
                 local dom=$(basename "$conf" | sed 's/emby_single_//; s/\.conf//')
@@ -199,27 +187,26 @@ deploy_single() {
             echo "  (无)"
         fi
 
-        echo -e "\n${CYAN}操作选项:${NC}"
-        echo "1) 添加或管理域名"
-        echo "2) 删除已配置域名"
+        echo -e "\n1) 添加/进入域名管理"
+        echo "2) 删除指定域名配置"
         echo "q) 返回主菜单"
-        read -p "请选择操作 [1/2/q]: " D_OPT
+        read -p "请选择: " S_OPT
         
-        if [[ "$D_OPT" == "q" ]]; then
+        if [[ "$S_OPT" == "q" ]]; then
             break
-        elif [[ "$D_OPT" == "2" ]]; then
-            read -p "请输入要彻底删除的反代域名: " del_dom
+        elif [[ "$S_OPT" == "2" ]]; then
+            read -p "请输入要删除的域名: " del_dom
             if [[ -f "/etc/nginx/conf.d/emby_single_$del_dom.conf" ]]; then
                 rm -f "/etc/nginx/conf.d/emby_single_$del_dom.conf"
                 nginx -s reload
-                echo -e "${GREEN}域名 $del_dom 的反代配置已彻底删除！${NC}"
+                echo -e "${GREEN}域名 $del_dom 已删除${NC}"
             else
-                echo -e "${RED}未找到域名 $del_dom 的配置。${NC}"
+                echo -e "${RED}未找到配置${NC}"
             fi
             sleep 1.5
             continue
-        elif [[ "$D_OPT" == "1" ]]; then
-            read -p "请输入你要配置的域名 (如 example.com): " D_SIN
+        elif [[ "$S_OPT" == "1" ]]; then
+            read -p "请输入域名 (如 emby.test.com): " D_SIN
             [[ -z "$D_SIN" ]] && continue
         else
             continue
@@ -227,16 +214,7 @@ deploy_single() {
 
         local TARGET_CONF="/etc/nginx/conf.d/emby_single_${D_SIN}.conf"
         
-        # 检查是否在别处(非此文件)被占用
-        local SEARCH=$(grep -l "server_name .*$D_SIN" /etc/nginx/conf.d/*.conf 2>/dev/null | grep -v "$TARGET_CONF" || true)
-        if [[ -n "$SEARCH" ]]; then
-            echo -e "${RED}错误: 域名 $D_SIN 已在其他配置中定义: $SEARCH${NC}"
-            echo "请先在主菜单卸载或清理冲突配置再重试。"
-            read -n 1 -s -r -p "按任意键继续..."
-            continue
-        fi
-        
-        # 如果是新域名，自动申请证书并创建基础框架
+        # 初始化新域名框架
         if [[ ! -f "$TARGET_CONF" ]]; then
             init_env
             handle_ssl "$D_SIN"
@@ -256,73 +234,44 @@ server {
 EOF
             nginx -t && systemctl restart nginx
         fi
-        
-        # --- 进入具体域名的路径管理 ---
+
+        # 路径管理内层循环
         while true; do
             clear
             echo -e "${CYAN}--- [$D_SIN] 路径管理 ---${NC}"
-            echo -e "${YELLOW}当前已配置路径：${NC}"
+            echo -e "${YELLOW}当前路径清单：${NC}"
             local paths=$(grep "location \^~ /" "$TARGET_CONF" | cut -d'/' -f2 | sed 's/\\//g')
-            if [[ -z "$paths" ]]; then
-                echo "  (无)"
-            else
-                for p in $paths; do
-                    echo -e "  - /$p/"
-                done
-            fi
-            
-            echo -e "\n${CYAN}操作提示:${NC}"
-            echo "- 输入新路径名 (如 emos) 来添加"
-            echo "- 输入已有路径名来管理 (覆盖/删除/重命名)"
-            echo "- 输入 q 返回上一级"
-            read -p "请输入路径名: " P_NAME
-            
+            [[ -z "$paths" ]] && echo "  (无)" || (for p in $paths; do echo -e "  - /$p/"; done)
+
+            echo -e "\n输入 [路径名] 添加或修改 (如: emos)"
+            echo "输入 [q] 返回上一级"
+            read -p "操作路径: " P_NAME
             [[ "$P_NAME" == "q" ]] && break
             [[ -z "$P_NAME" ]] && continue
-            
+
             if grep -q "location \^~ /$P_NAME/" "$TARGET_CONF"; then
-                echo -e "\n${YELLOW}路径 /$P_NAME/ 已存在，请选择操作：${NC}"
-                echo "1) 覆盖后端地址"
-                echo "2) 删除该路径"
-                echo "3) 重命名该路径"
+                echo -e "${YELLOW}路径 /$P_NAME/ 已存在：${NC}"
+                echo "1) 覆盖修改后端地址"
+                echo "2) 删除此路径"
+                echo "3) 重命名路径"
                 echo "4) 取消"
-                read -p "选择 [1-4]: " P_OPT
+                read -p "选择: " P_OPT
                 case $P_OPT in
-                    1)
-                        # 删除旧区块以便后续重新写入
-                        sed -i "/location \^~ \/$P_NAME\//,/}/d" "$TARGET_CONF"
-                        ;;
-                    2)
-                        sed -i "/location \^~ \/$P_NAME\//,/}/d" "$TARGET_CONF"
-                        echo -e "${GREEN}路径 /$P_NAME/ 已删除！${NC}"
-                        nginx -t && nginx -s reload
-                        sleep 1
-                        continue
-                        ;;
-                    3)
-                        read -p "请输入新路径名: " NEW_P_NAME
-                        if [[ -n "$NEW_P_NAME" ]]; then
-                            sed -i "s|location \^~ /$P_NAME/|location \^~ /$NEW_P_NAME/|g" "$TARGET_CONF"
-                            echo -e "${GREEN}路径 /$P_NAME/ 已重命名为 /$NEW_P_NAME/！${NC}"
-                            nginx -t && nginx -s reload
-                        fi
-                        sleep 1.5
-                        continue
-                        ;;
-                    *)
-                        continue
-                        ;;
+                    1) sed -i "/location \^~ \/$P_NAME\//,/}/d" "$TARGET_CONF" ;;
+                    2) sed -i "/location \^~ \/$P_NAME\//,/}/d" "$TARGET_CONF"; nginx -s reload; continue ;;
+                    3) read -p "新名称: " NEW_P; sed -i "s|location \^~ /$P_NAME/|location \^~ /$NEW_P/|g" "$TARGET_CONF"; nginx -s reload; continue ;;
+                    *) continue ;;
                 esac
             fi
-            
-            read -p "目标后端地址 (如 http://192.168.1.1:8096): " P_FULL_URL
-            [[ -z "$P_FULL_URL" ]] && continue
-            P_PROTO=$(echo $P_FULL_URL | grep :// | sed -e 's|://.*||'); [[ -z "$P_PROTO" ]] && P_PROTO="https"
-            P_HOST=$(echo $P_FULL_URL | sed -e 's|^.*://||' -e 's|/.*||')
+
+            read -p "后端地址 (如 http://1.2.3.4:8096): " P_URL
+            [[ -z "$P_URL" ]] && continue
+            P_PROTO=$(echo $P_URL | grep :// | sed -e 's|://.*||'); [[ -z "$P_PROTO" ]] && P_PROTO="http"
+            P_HOST=$(echo $P_URL | sed -e 's|^.*://||' -e 's|/.*||')
             P_PURE_HOST=$(echo $P_HOST | cut -d: -f1)
 
-            TMP_BLOCK=$(mktemp)
-            cat > "$TMP_BLOCK" << EOF
+            TMP_B=$(mktemp)
+            cat > "$TMP_B" << EOF
     location ^~ /$P_NAME/ {
         proxy_pass $P_PROTO://$P_HOST/;
         proxy_set_header Host $P_PURE_HOST;
@@ -343,29 +292,27 @@ EOF
     }
 EOF
             sed -i "/location \/ {/i \\" "$TARGET_CONF"
-            sed -i "/location \/ {/e cat $TMP_BLOCK" "$TARGET_CONF"
-            rm -f "$TMP_BLOCK"
-            
-            echo -e "${GREEN}路径 /$P_NAME/ 配置已更新！${NC}"
-            nginx -t && nginx -s reload
-            sleep 1.5
+            sed -i "/location \/ {/e cat $TMP_B" "$TARGET_CONF"
+            rm -f "$TMP_B"
+            nginx -s reload && echo -e "${GREEN}路径 /$P_NAME/ 已生效${NC}"
+            sleep 1
         done
     done
 }
 
-# --- 菜单 ---
+# --- 主菜单 ---
 while true; do
     clear
     echo -e "${CYAN}--- Emby Nginx Gateway Manager ---${NC}"
-    echo "1) 部署 [万能动态反代]"
-    echo "2) 部署/管理 [单站路径反代] (支持多域名与增删改)"
-    echo "3) 卸载全部配置"
+    echo "1) 部署/覆盖 [万能动态反代]"
+    echo "2) 部署/管理 [单站路径反代] (多域名/增删改)"
+    echo "3) 卸载全部网关配置"
     echo "q) 退出"
     read -p "选择: " OPT
     case $OPT in
         1) deploy_universal ;;
         2) deploy_single ;;
-        3) rm -f /etc/nginx/conf.d/emby_*.conf; systemctl restart nginx; echo -e "${GREEN}所有反代配置已清理！${NC}"; sleep 1.5 ;;
+        3) rm -f /etc/nginx/conf.d/emby_*.conf; systemctl restart nginx; echo "配置已清理"; sleep 1.5 ;;
         q) exit 0 ;;
     esac
 done
