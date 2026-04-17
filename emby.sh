@@ -156,13 +156,13 @@ server {
         if (\$request_method = 'OPTIONS') { return 204; }
         proxy_buffering off;
         proxy_request_buffering off;
+        proxy_force_ranges on;
+        proxy_set_header Range \$http_range;
+        proxy_set_header X-Accel-Buffering no;
         proxy_connect_timeout 60s;
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
         tcp_nodelay on;
-        proxy_set_header X-Accel-Buffering no;
-        proxy_force_ranges on;
-        proxy_set_header Range \$http_range;
     }
     location / { return 404; }
 }
@@ -289,6 +289,11 @@ EOF
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_force_ranges on;
+        proxy_set_header Range \$http_range;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+        tcp_nodelay on;
     }
 EOF
             sed -i "/location \/ {/i \\" "$TARGET_CONF"
