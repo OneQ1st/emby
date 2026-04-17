@@ -20,7 +20,6 @@ NC='\033[0m'
 # --- 证书检索功能 ---
 find_existing_cert() {
     local d=$1
-    # 搜索优先级: 1. 本脚本自定义目录 2. acme.sh 默认目录 3. certbot 默认目录
     local paths=(
         "$SSL_DIR/$d/fullchain.pem"
         "$HOME/.acme.sh/${d}_ecc/fullchain.cer"
@@ -159,11 +158,6 @@ server {
         proxy_set_header Host \$raw_target;
         proxy_ssl_server_name on;
         proxy_ssl_name \$raw_target;
-        # --- 转发真实IP ---
-       # proxy_set_header X-Real-IP \$remote_addr;
-       # proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-       # proxy_set_header X-Forwarded-Proto \$scheme;
-        # --- End ---
         proxy_ssl_verify off;
         proxy_hide_header 'Access-Control-Allow-Origin';
         add_header 'Access-Control-Allow-Origin' '*' always;
@@ -173,15 +167,13 @@ server {
         if (\$request_method = 'OPTIONS') { return 204; }
         proxy_buffering off;
         proxy_request_buffering off;
-        # ---新补充 ---
         proxy_connect_timeout 60s;
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
-        tcp_nodelay on; # 禁用 Nagle 算法，减少小包延迟（非常适合 WebSocket 握手）
-        # --- end ---
+        tcp_nodelay on;
         proxy_set_header X-Accel-Buffering no;
         proxy_force_ranges on;
-        proxy_set_header Range \$http_range; # 新补充
+        proxy_set_header Range \$http_range;
     }
     location / { return 404; }
 }
@@ -189,7 +181,7 @@ EOF
     nginx -t && systemctl restart nginx && echo -e "${GREEN}万能反代部署完成！${NC}"
 }
 
-# --- 2. 单站反代 (已重构交互逻辑) ---
+# --- 2. 单站反代 (已完全修复交互逻辑) ---
 deploy_single() {
     while true; do
         clear
@@ -208,31 +200,31 @@ deploy_single() {
         fi
 
         echo -e "\n${CYAN}操作选项:${NC}"
-        echo "1) 添加或管理域名 (输入具体域名，如 example.com)"
-        echo "2) 删除已配置域名 (输入 'del 域名'，如 del example.com)"
+        echo "1) 添加或管理域名"
+        echo "2) 删除已配置域名"
         echo "q) 返回主菜单"
-        read -p "请输入指令: " D_INPUT
+        read -p "请选择操作 [1/2/q]: " D_OPT
         
-        [[ "$D_INPUT" == "q" ]] && break
-        
-        # 整体删除某个单站配置
-        if [[ "$D_INPUT" == del\ * ]]; then
-            local del_dom=$(echo "$D_INPUT" | awk '{print $2}')
+        if [[ "$D_OPT" == "q" ]]; then
+            break
+        elif [[ "$D_OPT" == "2" ]]; then
+            read -p "请输入要彻底删除的反代域名: " del_dom
             if [[ -f "/etc/nginx/conf.d/emby_single_$del_dom.conf" ]]; then
                 rm -f "/etc/nginx/conf.d/emby_single_$del_dom.conf"
                 nginx -s reload
                 echo -e "${GREEN}域名 $del_dom 的反代配置已彻底删除！${NC}"
-                sleep 1.5
             else
                 echo -e "${RED}未找到域名 $del_dom 的配置。${NC}"
-                sleep 1.5
             fi
+            sleep 1.5
+            continue
+        elif [[ "$D_OPT" == "1" ]]; then
+            read -p "请输入你要配置的域名 (如 example.com): " D_SIN
+            [[ -z "$D_SIN" ]] && continue
+        else
             continue
         fi
 
-        local D_SIN="$D_INPUT"
-        [[ -z "$D_SIN" || "$D_SIN" == "1" || "$D_SIN" == "2" ]] && continue
-        
         local TARGET_CONF="/etc/nginx/conf.d/emby_single_${D_SIN}.conf"
         
         # 检查是否在别处(非此文件)被占用
