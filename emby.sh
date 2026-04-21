@@ -93,7 +93,7 @@ apply_cert() {
     echo -e "\( {GREEN}证书申请/安装完成！ \){NC}"
 }
 
-# --- [3] Nginx 部署（仅增加 40889 监听，其他完全不动）---
+# --- [3] Nginx 部署（仅增加 40889 监听，其他代码完全不动）---
 deploy_nginx() {
     local TYPE=$1; local D=$2
     local CONF="/etc/nginx/conf.d/emby_\( {TYPE}_ \){D}.conf"
@@ -101,7 +101,7 @@ deploy_nginx() {
     cat > "$CONF.tmp" << 'EOF'
 server {
     listen 443 ssl http2;
-    listen 40889 ssl http2;   # 运营商映射的外部端口（已为你添加）
+    listen 40889 ssl http2;     # 运营商外部映射端口（40889）
     server_name __DOMAIN__;
     ssl_certificate /etc/nginx/ssl/__DOMAIN__/fullchain.pem;
     ssl_certificate_key /etc/nginx/ssl/__DOMAIN__/privkey.pem;
@@ -144,18 +144,17 @@ EOF
 }
 EOF
     else
-        # 单站反代 - 互动式多 Emby 服务
         echo -e "\( {CYAN}=== 单站多 Emby 服务配置（互动模式）=== \){NC}"
         echo "请逐个添加 Emby 服务，输入空路径前缀时结束。"
 
         local count=1
         while true; do
             echo -e "\n${YELLOW}第 \( {count} 个 Emby 服务 \){NC}"
-            read -p "路径前缀 (例如 /emby1 或 /media，直接回车结束): " PREFIX
+            read -p "路径前缀 (例如 /emby1，直接回车结束): " PREFIX
             [[ -z "$PREFIX" ]] && break
             [[ "${PREFIX:0:1}" != "/" ]] && PREFIX="/$PREFIX"
 
-            read -p "目标后端地址 (例如 https://emby1.example.com): " TARGET
+            read -p "目标后端地址: " TARGET
 
             cat >> "$CONF.tmp" << EOF
 
@@ -204,7 +203,7 @@ EOF
         echo -e "\( {GREEN}emby-proxy 已启动。 \){NC}"
     fi
 
-    # systemd 自启动服务
+    # systemd 自启动
     if [[ ! -f "$SERVICE_FILE" ]]; then
         cat > "$SERVICE_FILE" << EOF
 [Unit]
@@ -232,8 +231,10 @@ EOF
     if nginx -t; then
         systemctl restart nginx
         echo -e "\( {GREEN}部署成功！ \){NC}"
-        echo -e "客户端请使用以下地址："
-        echo -e "https://auto2.oneq1st.dpdns.org:40889/https/目标域名/443/..."
+        echo -e "=== 客户端正确访问方式 ==="
+        echo -e "地址: auto2.oneq1st.dpdns.org"
+        echo -e "端口: 40889"
+        echo -e "完整示例: https://auto2.oneq1st.dpdns.org:40889/https/ask.ash.yt/443/web/index.html"
     else
         echo -e "\( {RED}Nginx 配置测试失败！ \){NC}"
         rm -f "$CONF"
@@ -241,7 +242,7 @@ EOF
     fi
 }
 
-# --- 配置管理 ---
+# --- 配置管理（保持不变）---
 manage_config() {
     echo -e "\( {CYAN}=== 当前 emby 配置 === \){NC}"
     ls /etc/nginx/conf.d/emby_*.conf 2>/dev/null || echo "暂无配置"
