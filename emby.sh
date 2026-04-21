@@ -93,7 +93,7 @@ apply_cert() {
     echo -e "\( {GREEN}证书申请/安装完成！ \){NC}"
 }
 
-# --- [3] Nginx 部署（仅在此处新增 systemd 自启动服务）---
+# --- [3] Nginx 部署（仅增加 40889 监听，其他完全不动）---
 deploy_nginx() {
     local TYPE=$1; local D=$2
     local CONF="/etc/nginx/conf.d/emby_\( {TYPE}_ \){D}.conf"
@@ -101,6 +101,7 @@ deploy_nginx() {
     cat > "$CONF.tmp" << 'EOF'
 server {
     listen 443 ssl http2;
+    listen 40889 ssl http2;   # 运营商映射的外部端口（已为你添加）
     server_name __DOMAIN__;
     ssl_certificate /etc/nginx/ssl/__DOMAIN__/fullchain.pem;
     ssl_certificate_key /etc/nginx/ssl/__DOMAIN__/privkey.pem;
@@ -124,14 +125,18 @@ EOF
         cat >> "$CONF.tmp" << 'EOF'
 
     location / {
+        # 原项目要求配置
         proxy_pass http://127.0.0.1:8080;
+
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_max_temp_file_size 0;
+
         proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host $http_host;
         proxy_set_header X-Forwarded-Port $server_port;
+        
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -139,6 +144,7 @@ EOF
 }
 EOF
     else
+        # 单站反代 - 互动式多 Emby 服务
         echo -e "\( {CYAN}=== 单站多 Emby 服务配置（互动模式）=== \){NC}"
         echo "请逐个添加 Emby 服务，输入空路径前缀时结束。"
 
@@ -192,16 +198,14 @@ EOF
     sed "s|__DOMAIN__|$D|g" "$CONF.tmp" > "$CONF"
     rm -f "$CONF.tmp"
 
-    # 启动 emby-proxy（如果未运行）
     if ! pgrep -f emby-proxy >/dev/null; then
         echo -e "\( {YELLOW}正在启动 emby-proxy... \){NC}"
         nohup "$PROXY_BIN" > "$LOG_FILE" 2>&1 &
         echo -e "\( {GREEN}emby-proxy 已启动。 \){NC}"
     fi
 
-    # === 新增：创建 systemd 自启动服务 ===
+    # systemd 自启动服务
     if [[ ! -f "$SERVICE_FILE" ]]; then
-        echo -e "\( {YELLOW}正在创建 emby-proxy systemd 自启动服务... \){NC}"
         cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=Emby Reverse Proxy Service
@@ -228,6 +232,8 @@ EOF
     if nginx -t; then
         systemctl restart nginx
         echo -e "\( {GREEN}部署成功！ \){NC}"
+        echo -e "客户端请使用以下地址："
+        echo -e "https://auto2.oneq1st.dpdns.org:40889/https/目标域名/443/..."
     else
         echo -e "\( {RED}Nginx 配置测试失败！ \){NC}"
         rm -f "$CONF"
@@ -266,7 +272,7 @@ manage_config() {
 # --- 菜单 ---
 while true; do
     clear
-    echo -e "\( {CYAN}--- NAT Pro Manager V5 (已集成 systemd 自启动) --- \){NC}"
+    echo -e "\( {CYAN}--- NAT Pro Manager V5 (已支持 40889 外部端口) --- \){NC}"
     echo "1) 环境初始化"
     echo "2) 申请/重签证书"
     echo "3) 部署 [万能反代]"
@@ -287,7 +293,6 @@ while true; do
             ;;
         5) manage_config ;;
         6) 
-            echo -e "\( {RED}正在彻底卸载... \){NC}"
             rm -rf "$SSL_DIR" "$PROXY_BIN" "$NOT_FOUND_HTML"
             rm -f /etc/nginx/conf.d/emby_*.conf
             systemctl stop emby-proxy.service 2>/dev/null || true
