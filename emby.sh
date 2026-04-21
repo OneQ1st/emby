@@ -43,7 +43,7 @@ EOF
 map $http_upgrade $connection_upgrade { default upgrade; '' close; }
 map $http_user_agent $is_emby_client {
     default 0;
-    "~*(Hills|yamby|Afuse|Capy|Fileball|Infuse|SenPlayer|VLC|VidHub|Emby|Android|iOS)" 1;
+    "~*(Hills|yamby|Afuse|Capy|Fileball|Infuse|SenPlayer)" 1;
 }
 EOF
 
