@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# --- 基础定义 ---
+# --- [基础定义] 100% 对齐项目路径 ---
 REPO_RAW_URL="https://raw.githubusercontent.com/OneQ1st/emby/main"
 PROXY_BIN="/usr/local/bin/emby-proxy"
 PROXY_CONF="/usr/local/bin/config.json"
@@ -11,7 +11,7 @@ MAP_CONF="/etc/nginx/conf.d/emby_maps.conf"
 HTML_DIR="/var/www/emby"
 HTML_FILE="$HTML_DIR/emby-404.html"
 
-# --- 颜色 ---
+# --- [颜色定义] ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -20,108 +20,90 @@ NC='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${RED}请使用 root 权限运行${NC}" && exit 1
 
-# --- [阶段一] 环境初始化 (安装分离) ---
-init_env() {
-    echo -e "${CYAN}正在初始化基础环境 (Nginx, acme.sh, lsof)...${NC}"
-    apt update && apt install -y nginx-full curl openssl sed socat cron wget lsof
-    mkdir -p "$HTML_DIR" "$SSL_DIR" "/var/www/html"
-    
-    curl -sLo "$HTML_FILE" "$REPO_RAW_URL/emby-404.html" || echo "警告：404资源同步失败"
-    
-    cat > "$MAP_CONF" << EOF
-map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
-map \$http_user_agent \$is_emby_client {
-    default 0;
-    "~*(Hills|yamby|Afuse|Capy|Fileball|Infuse|SenPlayer|VLC|VidHub|Emby|Android|iOS)" 1;
-}
-EOF
-    [[ ! -f "$HOME/.acme.sh/acme.sh" ]] && curl https://get.acme.sh | sh -s email="admin@google.com"
-    source "$HOME/.acme.sh/acme.sh.env" || true
-    echo -e "${GREEN}环境初始化完成。${NC}"
-}
-
-# --- [阶段二] 证书资产三级预检 (防重复申请) ---
+# --- [1] 资产三级预检 (VPS Check 核心逻辑) ---
 check_ssl_assets() {
     local DOMAIN=$1
     local TARGET_CERT="$SSL_DIR/$DOMAIN/fullchain.pem"
     local ACME_HOME_CERT="$HOME/.acme.sh/${DOMAIN}_ecc/fullchain.cer"
     
-    echo -e "${CYAN}检查 VPS 本地资产...${NC}"
+    echo -e "${CYAN}正在执行本地资产预检，防止无效申请...${NC}"
 
-    # 1. 检查 Nginx 部署目录
+    # 1. 检查 Nginx 部署目录证书 (效期 > 7天)
     if [[ -f "$TARGET_CERT" ]]; then
         if openssl x509 -checkend 604800 -noout -in "$TARGET_CERT"; then
-            echo -e "${GREEN}命中部署目录有效证书。${NC}"
+            echo -e "${GREEN}一级命中：VPS 部署目录已有有效证书，直接跳过验证流程。${NC}"
             return 0
         fi
     fi
 
-    # 2. 检查 acme.sh 家目录
+    # 2. 检查 acme.sh 默认保存目录 (防止已申请未同步)
     if [[ -f "$ACME_HOME_CERT" ]]; then
         if openssl x509 -checkend 604800 -noout -in "$ACME_HOME_CERT"; then
-            echo -e "${YELLOW}命中 acme.sh 目录有效资产，正在同步安装...${NC}"
+            echo -e "${YELLOW}二级命中：acme.sh 目录发现有效资产，正在同步安装...${NC}"
             mkdir -p "$SSL_DIR/$DOMAIN"
             "$HOME/.acme.sh/acme.sh" --install-cert -d "$DOMAIN" \
                 --key-file "$SSL_DIR/$DOMAIN/privkey.pem" \
-                --fullchain-file "$SSL_DIR/$DOMAIN/fullchain.pem" \
+                --fullchain-file "$TARGET_CERT" \
                 --reloadcmd "systemctl reload nginx"
             return 0
         fi
     fi
+
+    echo -e "${RED}三级预检结束：本地无可用资产，必须启动联网验证。${NC}"
     return 1
 }
 
-# --- [阶段三] NAT 适配申请逻辑 (支持自定义端口) ---
-request_cert() {
+# --- [2] 强化申请逻辑 (NAT 映射与 DNS Token 防冲突) ---
+request_cert_pro() {
     local DOMAIN=$1
     local ACME="$HOME/.acme.sh/acme.sh"
+    
+    echo -e "${CYAN}请根据 VPS 网络环境选择申请模式:${NC}"
+    echo "1) Cloudflare DNS 模式 (NAT机首选，需 Token 具备 DNS编辑+区域读取权限)"
+    echo "2) HTTP Standalone 模式 (需 NAT 面板将公网 80 转发至内网端口)"
+    read -p "选择 [1-2]: " MODE
 
-    echo -e "${YELLOW}进入联网申请模式 (NAT 适配)...${NC}"
-    echo "1) HTTP Standalone (自定义端口模式 - 解决 80 占用)"
-    echo "2) Cloudflare DNS (无需端口验证 - 推荐模式)"
-    read -p "选择模式 [1-2]: " MODE
-
-    if [[ "$MODE" == "2" ]]; then
-        read -p "CF API Token: " CF_Token
-        export CF_Token="$CF_Token"
-        $ACME --issue --dns dns_cf -d "$DOMAIN" --force --debug
-    else
-        read -p "请输入映射到内网的验证端口 (默认 80): " HTTP_PORT
-        HTTP_PORT=${HTTP_PORT:-80}
+    if [[ "$MODE" == "1" ]]; then
+        # 强制清理环境变量，防止 acme.sh 混淆 CF_Key 和 CF_Token
+        unset CF_Key; unset CF_Email; unset CF_Account_ID;
+        read -p "请输入 Cloudflare API Token: " USER_TOKEN
+        export CF_Token="$USER_TOKEN"
         
-        echo -e "${CYAN}使用端口 $HTTP_PORT 进行申请...${NC}"
-        # 如果是 80 端口，尝试释放；如果是非标端口，直接运行
-        if [[ "$HTTP_PORT" == "80" ]]; then
-            local PID=$(lsof -t -i:80 || true)
-            [[ -n "$PID" ]] && systemctl stop nginx || true
-        fi
-        
-        # 核心：使用 --httpport 参数适配 NAT 转发
-        $ACME --issue -d "$DOMAIN" --standalone --httpport "$HTTP_PORT" --force --debug || {
-            echo -e "${RED}申请失败！请检查 $HTTP_PORT 是否在 NAT 后台正确映射。${NC}"
-            [[ "$HTTP_PORT" == "80" ]] && systemctl start nginx || true
+        echo -e "${YELLOW}正在尝试 DNS 验证 (自动处理 Zone ID)...${NC}"
+        "$ACME" --issue --dns dns_cf -d "$DOMAIN" --force --debug || {
+            echo -e "${RED}申请失败！请检查 Token 权限是否包含：[Zone.DNS:Edit] 和 [Zone.Zone:Read]${NC}"
             exit 1
         }
-        [[ "$HTTP_PORT" == "80" ]] && systemctl start nginx || true
+    else
+        read -p "请输入映射到公网 80 的内网端口 (例如 40890): " NAT_PORT
+        NAT_PORT=${NAT_PORT:-80}
+        
+        # 强制清理端口占用，防止申请程序启动失败
+        fuser -k "${NAT_PORT}/tcp" || true
+        
+        echo -e "${YELLOW}正在通过端口 $NAT_PORT 进行独立验证...${NC}"
+        "$ACME" --issue -d "$DOMAIN" --standalone --httpport "$NAT_PORT" --force --debug || {
+            echo -e "${RED}验证失败！请确保 NAT 面板已将 公网80 映射到本机的 $NAT_PORT${NC}"
+            exit 1
+        }
     fi
 
-    # 安装证书
+    # 证书申请成功，执行安装
     mkdir -p "$SSL_DIR/$DOMAIN"
-    $ACME --install-cert -d "$DOMAIN" \
+    "$ACME" --install-cert -d "$DOMAIN" \
         --key-file "$SSL_DIR/$DOMAIN/privkey.pem" \
         --fullchain-file "$SSL_DIR/$DOMAIN/fullchain.pem" \
         --reloadcmd "systemctl reload nginx"
 }
 
-# --- [阶段四] Nginx 部署 (严格对齐项目方参数) ---
-deploy_nginx() {
-    local TYPE=$1
-    local DOMAIN=$2
-    local CONF="/etc/nginx/conf.d/emby_${TYPE}_${DOMAIN}.conf"
-    local PREFIX="/"
-    [[ "$TYPE" == "universal" ]] && PREFIX="/custom"
+# --- [3] Nginx 配置生成 (严格对齐项目核心 Header) ---
+deploy_nginx_final() {
+    local TYPE=$1; local DOMAIN=$2
+    local TARGET_CONF="/etc/nginx/conf.d/emby_${TYPE}_${DOMAIN}.conf"
+    local PREFIX="/"; [[ "$TYPE" == "universal" ]] && PREFIX="/custom"
 
-    cat > "$CONF" << EOF
+    echo -e "${CYAN}生成配置中，正在检查项目核心参数...${NC}"
+    cat > "$TARGET_CONF" << EOF
 server {
     listen 80;
     listen 443 ssl http2;
@@ -136,10 +118,9 @@ server {
 
     location / {
         if (\$is_emby_client = 0) { return 404; }
-
         proxy_pass http://127.0.0.1:8080;
         
-        # --- 项目要求 5 项 Header ---
+        # --- 项目要求 5 项核心 Header ---
         proxy_set_header Host \$http_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -147,11 +128,12 @@ server {
         proxy_set_header X-Forwarded-Host \$http_host;
         proxy_set_header X-Forwarded-Prefix $PREFIX;
 
-        # --- 性能优化 ---
+        # --- 性能优化 (推流核心) ---
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_max_temp_file_size 0;
         
+        # --- WebSocket 支持 ---
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -161,64 +143,41 @@ server {
     }
 }
 EOF
-    # 万能反代路径正则注入
-    [[ "$TYPE" == "universal" ]] && sed -i "/location \/ {/i \    location ~* \"^/(?<raw_proto>https?|wss?)://(?<raw_target>[a-zA-Z0-9\\\\.-]+)(?:[:/_](?<raw_port>\\\\d+))?(?<raw_path>/.*)?$\" { if (\$is_emby_client = 0) { return 404; } proxy_pass http://127.0.0.1:8080; proxy_set_header Host \$http_host; proxy_set_header X-Forwarded-Proto \$scheme; proxy_set_header X-Forwarded-Host \$http_host; proxy_set_header X-Forwarded-Prefix /custom; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \"upgrade\"; proxy_buffering off; proxy_max_temp_file_size 0; }" "$CONF"
+    # 万能模式正则路径动态插入 (严禁丢失)
+    if [[ "$TYPE" == "universal" ]]; then
+        sed -i "/location \/ {/i \    location ~* \"^/(?<raw_proto>https?|wss?)://(?<raw_target>[a-zA-Z0-9\\\\.-]+)(?:[:/_](?<raw_port>\\\\d+))?(?<raw_path>/.*)?$\" { if (\$is_emby_client = 0) { return 404; } proxy_pass http://127.0.0.1:8080; proxy_set_header Host \$http_host; proxy_set_header X-Forwarded-Proto \$scheme; proxy_set_header X-Forwarded-Host \$http_host; proxy_set_header X-Forwarded-Prefix /custom; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \"upgrade\"; proxy_buffering off; proxy_max_temp_file_size 0; }" "$TARGET_CONF"
+    fi
 
     nginx -t && systemctl restart nginx
-    echo -e "${GREEN}部署完成。${NC}"
+    echo -e "${GREEN}Nginx 配置已部署生效。${NC}"
 }
 
-# --- 后台服务管理 ---
-setup_service() {
-    curl -sLo "$PROXY_BIN" "$REPO_RAW_URL/emby-proxy"
-    curl -sLo "$PROXY_CONF" "$REPO_RAW_URL/config.json"
-    chmod +x "$PROXY_BIN"
-    cat > "$SERVICE_FILE" << EOF
-[Unit]
-Description=Emby Proxy Service
-After=network.target
-[Service]
-Type=simple
-WorkingDirectory=/usr/local/bin
-ExecStart=$PROXY_BIN -config $PROXY_CONF
-Restart=always
-RestartSec=5
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload && systemctl enable emby-proxy && systemctl restart emby-proxy
-    echo -e "${GREEN}服务已拉取并启动。${NC}"
-}
-
-# --- 卸载 ---
-uninstall() {
-    systemctl stop emby-proxy || true
-    rm -f "$SERVICE_FILE" "$PROXY_BIN" "$PROXY_CONF" /etc/nginx/conf.d/emby_*.conf "$MAP_CONF"
-    rm -rf "$SSL_DIR" "$HTML_DIR"
-    echo -e "${GREEN}项目已完整卸载。${NC}"
-}
-
-# --- 菜单 ---
+# --- [4] 主控菜单 ---
 while true; do
     clear
-    echo -e "${CYAN}--- NAT Gateway Manager (Manual Port) ---${NC}"
-    echo "1) 环境初始化"
-    echo "2) 同步资源并启动服务"
-    echo "3) 部署 [万能反代] (含预检+自定义端口)"
-    echo "4) 部署 [单站反代] (含预检+自定义端口)"
-    echo "5) 彻底卸载"
+    echo -e "${CYAN}==========================================${NC}"
+    echo -e "${CYAN}   Emby Gateway 2026 (NAT/DNS 增强版)    ${NC}"
+    echo -e "${CYAN}==========================================${NC}"
+    echo "1) 初始化环境 (Nginx/acme.sh/Lsof)"
+    echo "2) 同步 GitHub 服务组件"
+    echo "3) 部署 [万能反代] (含资产预检+强申)"
+    echo "4) 部署 [单站反代] (含资产预检+强申)"
+    echo "5) 彻底卸载清理"
     echo "q) 退出"
+    echo -e "${CYAN}------------------------------------------${NC}"
     read -p "指令: " OPT
     case $OPT in
-        1) init_env ;;
-        2) setup_service ;;
+        1) apt update && apt install -y nginx-full curl openssl socat psmisc lsof
+           [[ ! -f "$HOME/.acme.sh/acme.sh" ]] && curl https://get.acme.sh | sh -s email="admin@google.com" ;;
+        2) curl -sLo "$PROXY_BIN" "$REPO_RAW_URL/emby-proxy" && chmod +x "$PROXY_BIN" ;;
         3|4) 
-            read -p "域名: " D
-            check_ssl_assets "$D" || request_cert "$D"
-            [[ "$OPT" == "3" ]] && deploy_nginx "universal" "$D" || deploy_nginx "single" "$D"
+            read -p "绑定域名: " D
+            # 逻辑：检查本地资产 -> 命中则直接部署，不命中则联网申请
+            check_ssl_assets "$D" || request_cert_pro "$D"
+            [[ "$OPT" == "3" ]] && deploy_nginx_final "universal" "$D" || deploy_nginx_final "single" "$D"
             ;;
-        5) uninstall ;;
+        5) rm -rf "$SSL_DIR" /etc/nginx/conf.d/emby_*.conf && systemctl restart nginx ;;
         q) exit 0 ;;
     esac
-    read -p "操作完成，按回车返回菜单..."
+    read -p "按回车继续..."
 done
