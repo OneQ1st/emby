@@ -12,6 +12,11 @@ sudo ./emby.sh
 ```
 方案二
 ```
+# 先修复环境（强烈建议先运行这行）
+apt update -y && apt install -y git golang-go
+```
+运行代码
+```
 curl -sLO https://raw.githubusercontent.com/OneQ1st/emby/main/deploy.sh
 chmod +x deploy.sh
 sudo ./deploy.sh
