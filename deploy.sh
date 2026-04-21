@@ -2,7 +2,7 @@
 
 # ==================== Emby-Proxy 一键部署脚本 ====================
 # GitHub: https://github.com/OneQ1st/emby
-# 自动检测架构 + 官方 Caddy + 修复 Caddyfile 语法
+# 最终稳定版 - 自动检测架构 + 可靠下载
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -52,23 +52,32 @@ apt install -y curl wget socat net-tools psmisc
 rm -rf /opt/emby-proxy
 mkdir -p /opt/emby-proxy
 
-# ====================== 下载文件 ======================
+# ====================== 下载 emby-proxy ======================
 echo -e "\( {YELLOW}>>> 正在下载 emby-proxy... \){NC}"
-wget -q https://github.com/OneQ1st/emby/raw/main/emby-proxy -O /opt/emby-proxy/emby-proxy
+wget -q https://github.com/OneQ1st/emby/raw/main/emby-proxy -O /opt/emby-proxy/emby-proxy || echo -e "\( {RED}emby-proxy 下载失败 \){NC}"
 chmod +x /opt/emby-proxy/emby-proxy
 
 if [ ! -x "/opt/emby-proxy/emby-proxy" ]; then
-    echo -e "\( {RED}❌ emby-proxy 下载失败！请确保仓库中已上传正确的 emby-proxy \){NC}"
+    echo -e "\( {RED}❌ emby-proxy 下载失败！请确认仓库中已上传 emby-proxy 文件 \){NC}"
     exit 1
 fi
+echo -e "\( {GREEN}>>> emby-proxy 下载完成 \){NC}"
 
+# ====================== 下载 Caddy (使用稳定直链) ======================
 echo -e "\( {YELLOW}>>> 正在下载官方 Caddy ( \){CADDY_ARCH})...${NC}"
-wget -q https://github.com/caddyserver/caddy/releases/latest/download/caddy_linux_${CADDY_ARCH}.tar.gz -O /tmp/caddy.tar.gz
-tar -xzf /tmp/caddy.tar.gz -C /opt/emby-proxy caddy
-rm -f /tmp/caddy.tar.gz
+cd /opt/emby-proxy
+wget -q --show-progress https://github.com/caddyserver/caddy/releases/latest/download/caddy_linux_${CADDY_ARCH}.tar.gz -O caddy.tar.gz
 
-if [ ! -x "/opt/emby-proxy/caddy" ]; then
-    echo -e "\( {RED}❌ Caddy 下载失败！ \){NC}"
+if [ ! -s "caddy.tar.gz" ]; then
+    echo -e "\( {RED}❌ 下载失败，正在尝试备用方式... \){NC}"
+    wget -q --show-progress https://github.com/caddyserver/caddy/releases/download/v2.11.2/caddy_2.11.2_linux_${CADDY_ARCH}.tar.gz -O caddy.tar.gz
+fi
+
+tar -xzf caddy.tar.gz caddy 2>/dev/null || true
+rm -f caddy.tar.gz
+
+if [ ! -x "caddy" ]; then
+    echo -e "\( {RED}❌ Caddy 下载/解压失败！ \){NC}"
     exit 1
 fi
 echo -e "\( {GREEN}>>> Caddy 下载完成 \){NC}"
@@ -83,7 +92,7 @@ echo -e "1) HTTP Standalone（推荐，如果 80 端口可临时开放）"
 echo -e "2) Cloudflare DNS（推荐，80 端口被封锁时使用）"
 read -p "选择 [1/2]: " AUTH_MODE
 
-# ====================== 生成正确的 Caddyfile ======================
+# ====================== 生成 Caddyfile ======================
 cat > /opt/emby-proxy/Caddyfile << EOF
 {
     email admin@example.com
@@ -103,14 +112,11 @@ http://${DOMAIN} {
 }
 EOF
 
-# Cloudflare DNS 模式处理
 if [ "$AUTH_MODE" == "2" ]; then
     echo -e "\( {YELLOW}>>> Cloudflare DNS 模式 \){NC}"
     read -p "请输入 Cloudflare API Token: " CF_TOKEN
     read -p "请输入邮箱: " MY_EMAIL
-    
     sed -i "s|email admin@example.com|email $MY_EMAIL|" /opt/emby-proxy/Caddyfile
-    
     cat >> /opt/emby-proxy/Caddyfile << EOF
 
     tls {
@@ -124,18 +130,16 @@ else
     sed -i "s|email admin@example.com|email $MY_EMAIL|" /opt/emby-proxy/Caddyfile
 fi
 
-# ====================== 创建 systemd 服务 ======================
+# ====================== 创建服务并启动 ======================
 cat > /etc/systemd/system/emby-backend.service << EOF
 [Unit]
 Description=Emby Proxy Backend
 After=network.target
-
 [Service]
 WorkingDirectory=/opt/emby-proxy
 ExecStart=/opt/emby-proxy/emby-proxy
 Restart=always
 RestartSec=5
-
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -144,19 +148,16 @@ cat > /etc/systemd/system/caddy-proxy.service << EOF
 [Unit]
 Description=Caddy SSL Frontend
 After=network.target
-
 [Service]
 WorkingDirectory=/opt/emby-proxy
 EnvironmentFile=-/opt/emby-proxy/caddy.env
 ExecStart=/opt/emby-proxy/caddy run --config /opt/emby-proxy/Caddyfile --adapter caddyfile
 Restart=always
 RestartSec=5
-
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# ====================== 启动服务 ======================
 chmod +x /opt/emby-proxy/emby-proxy /opt/emby-proxy/caddy
 systemctl daemon-reload
 systemctl enable --now emby-backend caddy-proxy
@@ -164,10 +165,10 @@ systemctl enable --now emby-backend caddy-proxy
 echo -e "\n\( {GREEN}🎉 部署完成！ \){NC}"
 echo -e "访问地址: https://$DOMAIN:$EX_PORT"
 echo -e "\n\( {YELLOW}常用命令： \){NC}"
-echo -e "  查看日志     : journalctl -u caddy-proxy -f"
-echo -e "  重启服务     : systemctl restart emby-backend caddy-proxy"
-echo -e "  一键卸载     : ./deploy.sh uninstall"
+echo -e "  查看日志: journalctl -u caddy-proxy -f"
+echo -e "  重启服务: systemctl restart emby-backend caddy-proxy"
+echo -e "  一键卸载: ./deploy.sh uninstall"
 
-echo -e "\n\( {YELLOW}正在显示 Caddy 日志（首次申请证书可能需要 1-2 分钟）： \){NC}"
+echo -e "\n\( {YELLOW}正在显示 Caddy 日志（首次申请证书可能需要等待）： \){NC}"
 sleep 2
 journalctl -u caddy-proxy -n 60 -f
