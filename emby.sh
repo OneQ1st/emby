@@ -87,7 +87,7 @@ server {
     proxy_max_temp_file_size 0;
 
     # 万能反代：支持 https?://target:port/path 格式
-    location \~* ^/(?<raw_proto>https?|wss?)://(?<raw_target>[^/:]+)(?::(?<raw_port>\d+))?(?<raw_path>/.*)?$ {
+    location ~* ^/(?<raw_proto>https?|wss?)://(?<raw_target>[^/:]+)(?::(?<raw_port>\d+))?(?<raw_path>/.*)?$ {
         if ($is_emby_client = 0) { return 404; }
 
         set $p_proto $raw_proto;
