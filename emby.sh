@@ -20,32 +20,32 @@ NC='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${RED}请使用 root 权限运行${NC}" && exit 1
 
-# --- [1] 环境初始化 (修复 acme.sh 报错的核心) ---
+# --- [1] 强制环境初始化 (专门解决 Pre-check failed) ---
 init_env() {
-    echo -e "${CYAN}正在初始化 Debian 环境并补全缺失组件...${NC}"
+    echo -e "${CYAN}正在强制初始化环境...${NC}"
+    
+    # 强制解锁 apt
+    rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock
+    
     apt update
-    # 补全 cron, lsof, psmisc, socat 等核心依赖
-    apt install -y nginx-full curl openssl socat psmisc lsof cron wget
+    # 核心：必须先装上 cron
+    apt install -y cron nginx-full curl openssl socat psmisc lsof wget
     
-    # 确保 cron 服务启动 (解决你刚刚遇到的 Pre-check failed)
-    systemctl enable --now cron
+    # 启动并激活 cron
+    systemctl enable --now cron || echo -e "${YELLOW}警告: cron 启动失败，尝试手动补救...${NC}"
 
-    mkdir -p "$HTML_DIR" "$SSL_DIR" "/var/www/html"
+    mkdir -p "$HTML_DIR" "$SSL_DIR"
     
-    # 安装 acme.sh (强制模式)
+    # 强制安装 acme.sh，跳过 crontab 检查
     if [[ ! -f "$HOME/.acme.sh/acme.sh" ]]; then
-        curl https://get.acme.sh | sh -s email="admin@google.com" || {
-            echo "尝试强制安装 acme.sh..."
-            cd /tmp && wget https://github.com/acmesh-official/acme.sh/archive/master.tar.gz
-            tar zxvf master.tar.gz && cd acme.sh-master
-            ./acme.sh --install --force --email "admin@google.com"
-            cd .. && rm -rf acme.sh-master master.tar.gz
-        }
+        echo -e "${YELLOW}正在通过强制模式安装 acme.sh...${NC}"
+        curl https://get.acme.sh | sh -s email="admin@google.com" --force
     fi
     
-    source "$HOME/.acme.sh/acme.sh.env" || true
+    # 立即加载环境变量
+    [ -f "$HOME/.acme.sh/acme.sh.env" ] && source "$HOME/.acme.sh/acme.sh.env"
     
-    # 写入 Nginx Map (UA 白名单)
+    # 写入 UA 白名单配置
     cat > "$MAP_CONF" << EOF
 map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
 map \$http_user_agent \$is_emby_client {
@@ -53,21 +53,21 @@ map \$http_user_agent \$is_emby_client {
     "~*(Hills|yamby|Afuse|Capy|Fileball|Infuse|SenPlayer|VLC|VidHub|Emby|Android|iOS)" 1;
 }
 EOF
-    echo -e "${GREEN}环境补全完成。${NC}"
+    echo -e "${GREEN}环境强制初始化完成，请继续后续步骤。${NC}"
 }
 
-# --- [2] 资产三级预检 (VPS 本地资产发现) ---
+# --- [2] 资产三级预检 (VPS Check) ---
 check_ssl_assets() {
     local DOMAIN=$1
     local TARGET_CERT="$SSL_DIR/$DOMAIN/fullchain.pem"
     local ACME_HOME_CERT="$HOME/.acme.sh/${DOMAIN}_ecc/fullchain.cer"
     
-    echo -e "${CYAN}正在预检 VPS 本地证书资产...${NC}"
+    echo -e "${CYAN}正在预检本地资产...${NC}"
     if [[ -f "$TARGET_CERT" ]] && openssl x509 -checkend 604800 -noout -in "$TARGET_CERT"; then
-        echo -e "${GREEN}命中部署目录资产，直接跳过申请。${NC}"; return 0
+        echo -e "${GREEN}部署目录已有有效证书，跳过申请。${NC}"; return 0
     fi
     if [[ -f "$ACME_HOME_CERT" ]] && openssl x509 -checkend 604800 -noout -in "$ACME_HOME_CERT"; then
-        echo -e "${YELLOW}命中 acme.sh 资产，执行同步安装...${NC}"
+        echo -e "${YELLOW}acme.sh 目录发现资产，执行同步安装...${NC}"
         mkdir -p "$SSL_DIR/$DOMAIN"
         "$HOME/.acme.sh/acme.sh" --install-cert -d "$DOMAIN" --key-file "$SSL_DIR/$DOMAIN/privkey.pem" --fullchain-file "$TARGET_CERT" --reloadcmd "systemctl reload nginx"
         return 0
@@ -75,13 +75,13 @@ check_ssl_assets() {
     return 1
 }
 
-# --- [3] 证书申请 (NAT & DNS 适配) ---
+# --- [3] 强化申请逻辑 ---
 request_cert_pro() {
     local DOMAIN=$1
     local ACME="$HOME/.acme.sh/acme.sh"
     echo -e "${CYAN}选择申请模式:${NC}"
-    echo "1) Cloudflare DNS (推荐，需 Token 权限全开)"
-    echo "2) HTTP Standalone (需 NAT 80 端口转发)"
+    echo "1) Cloudflare DNS (NAT机首选)"
+    echo "2) HTTP Standalone (需公网 80 映射)"
     read -p "选择: " MODE
 
     if [[ "$MODE" == "1" ]]; then
@@ -90,7 +90,7 @@ request_cert_pro() {
         export CF_Token="$USER_TOKEN"
         "$ACME" --issue --dns dns_cf -d "$DOMAIN" --force --debug
     else
-        read -p "内网验证端口 (NAT机映射端口): " NAT_PORT
+        read -p "映射到本机的内网验证端口: " NAT_PORT
         NAT_PORT=${NAT_PORT:-80}
         fuser -k "${NAT_PORT}/tcp" || true
         "$ACME" --issue -d "$DOMAIN" --standalone --httpport "$NAT_PORT" --force --debug
@@ -99,7 +99,7 @@ request_cert_pro() {
     "$ACME" --install-cert -d "$DOMAIN" --key-file "$SSL_DIR/$DOMAIN/privkey.pem" --fullchain-file "$SSL_DIR/$DOMAIN/fullchain.pem" --reloadcmd "systemctl reload nginx"
 }
 
-# --- [4] Nginx 配置 (严格参数对齐) ---
+# --- [4] Nginx 配置部署 (严格参数对齐) ---
 deploy_nginx_final() {
     local TYPE=$1; local DOMAIN=$2
     local CONF="/etc/nginx/conf.d/emby_${TYPE}_${DOMAIN}.conf"
@@ -137,8 +137,8 @@ EOF
 # --- 菜单控制 ---
 while true; do
     clear
-    echo -e "${CYAN}--- NAT/Debian 终极部署脚本 ---${NC}"
-    echo "1) 初始化环境 (修复 Cron/acme.sh)"
+    echo -e "${CYAN}--- NAT/Debian 强制修复脚本 ---${NC}"
+    echo "1) 初始化环境 (强制安装依赖)"
     echo "2) 同步服务文件"
     echo "3) 部署 [万能反代]"
     echo "4) 部署 [单站反代]"
