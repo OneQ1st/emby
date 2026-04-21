@@ -24,15 +24,12 @@ init_env() {
 
     systemctl enable --now cron
 
-    # 下载预编译的 emby-proxy 二进制
     echo -e "\( {YELLOW}正在下载 emby-proxy 二进制文件... \){NC}"
     curl -sLo "$PROXY_BIN" "$REPO_RAW_URL/emby-proxy" && chmod +x "$PROXY_BIN"
     
-    # 下载自定义 404 页面
     echo -e "\( {YELLOW}正在下载 emby-404.html... \){NC}"
     curl -sLo "$NOT_FOUND_HTML" "$REPO_RAW_URL/emby-404.html"
 
-    # 写入 UA Map
     cat > "$MAP_CONF" << 'EOF'
 map $http_upgrade $connection_upgrade { default upgrade; '' close; }
 map $http_user_agent $is_emby_client {
@@ -41,7 +38,7 @@ map $http_user_agent $is_emby_client {
 }
 EOF
 
-    echo -e "\( {GREEN}环境初始化完成（emby-proxy + emby-404.html 已就绪）。 \){NC}"
+    echo -e "\( {GREEN}环境初始化完成。 \){NC}"
 }
 
 # --- [2] 证书申请逻辑 ---
@@ -69,7 +66,7 @@ apply_cert() {
         --reloadcmd "systemctl reload nginx"
 }
 
-# --- [3] Nginx 部署（修复 \~* 转义问题 + 单站支持路径后缀）---
+# --- [3] Nginx 部署（已修复 root 在 if 中报错问题）---
 deploy_nginx() {
     local TYPE=$1; local D=$2
     local CONF="/etc/nginx/conf.d/emby_\( {TYPE}_ \){D}.conf"
@@ -80,14 +77,12 @@ deploy_nginx() {
         read -p "请输入单站目标后端地址 (例如 https://m.mobaiemby.site): " TARGET
         [[ -z "$TARGET" ]] && TARGET="http://127.0.0.1:8080"
         
-        read -p "请输入路径后缀（可选，例如 /emby 或 /media，直接回车表示无后缀）: " PATH_SUFFIX
+        read -p "请输入路径后缀（可选，例如 /emby，直接回车表示无后缀）: " PATH_SUFFIX
         [[ -z "$PATH_SUFFIX" ]] && PATH_SUFFIX="/"
         [[ "${PATH_SUFFIX:0:1}" != "/" ]] && PATH_SUFFIX="/$PATH_SUFFIX"
     fi
 
-    if [[ "$TYPE" == "universal" ]]; then
-        # 万能反代（走 emby-proxy）
-        cat > "$CONF.tmp" << 'EOF'
+    cat > "$CONF.tmp" << 'EOF'
 server {
     listen 443 ssl http2;
     server_name __DOMAIN__;
@@ -100,14 +95,24 @@ server {
     proxy_request_buffering off;
     proxy_max_temp_file_size 0;
 
+    # 非 Emby 客户端返回自定义 404 页面（修复版）
+    error_page 403 = @emby_403;
     if ($is_emby_client = 0) {
-        root /etc/nginx;
-        try_files /emby-404.html =404;
-        add_header Content-Type text/html;
-        return 404;
+        return 403;
     }
 
+    location @emby_403 {
+        root /etc/nginx;
+        try_files /emby-404.html =404;
+        internal;
+    }
+
+    # ==================== 万能反代 或 单站反代 ====================
     location / {
+EOF
+
+    if [[ "$TYPE" == "universal" ]]; then
+        cat >> "$CONF.tmp" << 'EOF'
         proxy_pass http://127.0.0.1:8080/;
         proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -116,30 +121,10 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
-    }
-}
 EOF
     else
         # 单站反代（支持路径后缀）
-        cat > "$CONF.tmp" << 'EOF'
-server {
-    listen 443 ssl http2;
-    server_name __DOMAIN__;
-    ssl_certificate /etc/nginx/ssl/__DOMAIN__/fullchain.pem;
-    ssl_certificate_key /etc/nginx/ssl/__DOMAIN__/privkey.pem;
-
-    proxy_buffering off;
-    proxy_request_buffering off;
-    proxy_max_temp_file_size 0;
-
-    if ($is_emby_client = 0) {
-        root /etc/nginx;
-        try_files /emby-404.html =404;
-        add_header Content-Type text/html;
-        return 404;
-    }
-
-    location / {
+        cat >> "$CONF.tmp" << 'EOF'
         proxy_pass __TARGET____PATH_SUFFIX__;
         proxy_set_header Host $proxy_host;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -148,12 +133,15 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
-    }
-}
 EOF
     fi
 
-    # 替换占位符（关键：sed 使用 | 分隔符，避免 / 冲突）
+    cat >> "$CONF.tmp" << 'EOF'
+    }
+}
+EOF
+
+    # 替换变量
     sed "s|__DOMAIN__|$D|g" "$CONF.tmp" > "$CONF"
 
     if [[ "$TYPE" == "single" ]]; then
@@ -163,7 +151,7 @@ EOF
 
     rm -f "$CONF.tmp"
 
-    # 启动 emby-proxy（仅万能反代需要）
+    # 启动 emby-proxy（仅万能需要）
     if [[ "$TYPE" == "universal" ]] && ! pgrep -f emby-proxy >/dev/null; then
         echo -e "\( {YELLOW}正在启动 emby-proxy (监听 :8080)... \){NC}"
         nohup "$PROXY_BIN" > "$LOG_FILE" 2>&1 &
@@ -172,19 +160,17 @@ EOF
 
     if nginx -t; then
         systemctl restart nginx
-        echo -e "\( {GREEN}部署完成！ \){NC}"
+        echo -e "\( {GREEN}部署成功！ \){NC}"
         if [[ "$TYPE" == "universal" ]]; then
-            echo -e "万能反代域名: https://$D"
-            echo -e "使用方式: https://$D/https/目标域名/443/路径"
-            echo -e "示例: https://$D/https/emby.example.com/443/web/index.html"
+            echo -e "万能反代域名 → https://$D"
+            echo -e "使用示例: https://$D/https/emby.example.com/443/web/index.html"
         else
-            echo -e "单站反代域名: https://$D"
-            echo -e "目标后端: $TARGET"
+            echo -e "单站反代域名 → https://$D"
+            echo -e "目标: $TARGET"
             echo -e "路径后缀: $PATH_SUFFIX"
-            echo -e "访问示例: https://$D/   （会自动加上后缀）"
         fi
     else
-        echo -e "\( {RED}Nginx 配置测试失败，请查看 nginx -t 输出。 \){NC}"
+        echo -e "\( {RED}Nginx 配置测试失败！ \){NC}"
         rm -f "$CONF"
         return 1
     fi
@@ -193,11 +179,11 @@ EOF
 # --- 菜单 ---
 while true; do
     clear
-    echo -e "\( {CYAN}--- NAT Pro Manager V5 (两个域名共存 + 单站支持路径后缀) --- \){NC}"
-    echo "1) 环境初始化 (下载 emby-proxy + 404.html)"
+    echo -e "\( {CYAN}--- NAT Pro Manager V5 (已修复 root 报错) --- \){NC}"
+    echo "1) 环境初始化"
     echo "2) 申请/重签证书"
-    echo "3) 部署 [万能反代]（专用域名）"
-    echo "4) 部署 [单站反代]（另一个专用域名，支持路径后缀）"
+    echo "3) 部署 [万能反代]"
+    echo "4) 部署 [单站反代]（支持路径后缀）"
     echo "5) 彻底卸载"
     read -p "指令: " OPT
     case $OPT in
@@ -206,7 +192,7 @@ while true; do
         3) 
             read -p "万能反代域名: " D
             if [[ ! -f "$SSL_DIR/$D/fullchain.pem" ]]; then
-                echo -e "\( {YELLOW}未检测到证书，请先执行选项 2 申请证书。 \){NC}"
+                echo -e "\( {YELLOW}请先执行选项 2 申请证书。 \){NC}"
             else
                 deploy_nginx "universal" "$D"
             fi
@@ -214,13 +200,12 @@ while true; do
         4) 
             read -p "单站反代域名: " D
             if [[ ! -f "$SSL_DIR/$D/fullchain.pem" ]]; then
-                echo -e "\( {YELLOW}未检测到证书，请先执行选项 2 申请证书。 \){NC}"
+                echo -e "\( {YELLOW}请先执行选项 2 申请证书。 \){NC}"
             else
                 deploy_nginx "single" "$D"
             fi
             ;;
         5) 
-            echo -e "\( {RED}正在彻底卸载... \){NC}"
             rm -rf "$SSL_DIR" "$PROXY_BIN" "$NOT_FOUND_HTML"
             rm -f /etc/nginx/conf.d/emby_*.conf
             pkill -f emby-proxy || true
