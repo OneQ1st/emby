@@ -10,56 +10,64 @@ echo -e "\( {GREEN}==================================================== \){NC}"
 echo -e "${GREEN}    Emby-Proxy 一键部署脚本 (Caddy 自动证书版)    ${NC}"
 echo -e "\( {GREEN}==================================================== \){NC}"
 
-# ====================== 一键卸载功能 ======================
+# ====================== 一键卸载 ======================
 if [ "$1" = "uninstall" ]; then
-    echo -e "\( {RED}⚠️  警告：即将卸载 Emby-Proxy 相关服务和文件！ \){NC}"
-    read -p "确认要卸载吗？(y/n): " confirm
+    echo -e "\( {RED}⚠️  警告：即将完全卸载 Emby-Proxy！ \){NC}"
+    read -p "确认卸载吗？(y/n): " confirm
     if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-        echo "已取消卸载。"
+        echo "已取消。"
         exit 0
     fi
-    
-    echo -e "\( {YELLOW}>>> 开始卸载... \){NC}"
     systemctl stop emby-backend caddy-proxy 2>/dev/null || true
     systemctl disable emby-backend caddy-proxy 2>/dev/null || true
-    rm -f /etc/systemd/system/emby-backend.service
-    rm -f /etc/systemd/system/caddy-proxy.service
+    rm -f /etc/systemd/system/emby-backend.service /etc/systemd/system/caddy-proxy.service
     systemctl daemon-reload
-    
-    rm -rf /opt/emby-proxy
-    rm -rf /opt/emby-reverse-proxy-go
-    
-    echo -e "\( {GREEN}✅ 卸载完成！所有相关文件和服务已清除。 \){NC}"
+    rm -rf /opt/emby-proxy /opt/emby-reverse-proxy-go
+    echo -e "\( {GREEN}✅ 卸载完成！ \){NC}"
     exit 0
 fi
 
-# ====================== 正常部署流程 ======================
-# 1. 安装基础依赖
+# ====================== 部署流程 ======================
+echo -e "\( {YELLOW}>>> 安装必要依赖（git + golang）... \){NC}"
 apt update -y
-apt install -y curl socat fuser net-tools tar wget git golang-go 2>/dev/null
+apt install -y git golang-go curl socat fuser net-tools wget 2>/dev/null
 
-# 2. 编译 emby-proxy
+# 确保工具可用
+if ! command -v git >/dev/null || ! command -v go >/dev/null; then
+    echo -e "\( {RED}❌ 依赖安装失败，请手动运行：apt install -y git golang-go \){NC}"
+    exit 1
+fi
+
+echo -e "\( {GREEN}>>> 依赖安装完成 \){NC}"
+
+# 清理旧文件
+rm -rf /opt/emby-reverse-proxy-go /opt/emby-proxy
+
+mkdir -p /opt/emby-proxy
+
+# 1. 编译 emby-proxy
 echo -e "\( {YELLOW}>>> 正在拉取并编译 emby-proxy... \){NC}"
 cd /opt
-rm -rf emby-reverse-proxy-go          # 清理旧源码（防止残余）
 git clone https://github.com/Gsy-allen/emby-reverse-proxy-go.git
 cd emby-reverse-proxy-go
 
 go mod tidy
 go build -ldflags="-s -w" -o emby-proxy main.go
 
-cp emby-proxy /opt/emby-proxy/emby-proxy 2>/dev/null || mkdir -p /opt/emby-proxy && cp emby-proxy /opt/emby-proxy/emby-proxy
-
+cp emby-proxy /opt/emby-proxy/emby-proxy
 echo -e "\( {GREEN}>>> emby-proxy 编译完成 \){NC}"
 
-# 3. 编译 Caddy（带 Cloudflare DNS 插件）
+# 2. 编译 Caddy（带 Cloudflare DNS 插件）
 echo -e "\( {YELLOW}>>> 正在编译 Caddy（支持 Cloudflare DNS）... \){NC}"
 go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+
+# 等待 xcaddy 安装完成
+export PATH="$PATH:$HOME/go/bin"
 xcaddy build --with github.com/caddy-dns/cloudflare --output /opt/emby-proxy/caddy
 
 echo -e "\( {GREEN}>>> Caddy 编译完成 \){NC}"
 
-# 4. 收集参数
+# 3. 收集参数
 read -p "请输入你的域名 (例如: emby.example.com): " DOMAIN
 read -p "请输入外部端口 (默认 443): " EX_PORT
 EX_PORT=${EX_PORT:-443}
@@ -69,16 +77,17 @@ echo -e "1) HTTP Standalone（推荐，如果能临时开放 80 端口）"
 echo -e "2) Cloudflare DNS（推荐，80 端口被封时使用）"
 read -p "选择 [1/2]: " AUTH_MODE
 
-# 5. 生成 Caddyfile
+# 4. 生成 Caddyfile
 cat <<CADDY_EOF > /opt/emby-proxy/Caddyfile
 {
-    email admin@example.com   # 将在下面替换
+    email admin@example.com
 }
 
 $DOMAIN:$EX_PORT {
     reverse_proxy 127.0.0.1:8080 {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-Proto {scheme}
         flush_interval -1
     }
 }
@@ -89,10 +98,9 @@ http://$DOMAIN {
 CADDY_EOF
 
 if [ "$AUTH_MODE" == "2" ]; then
-    echo -e "\( {YELLOW}>>> 已选择 Cloudflare DNS 模式 \){NC}"
+    echo -e "\( {YELLOW}>>> Cloudflare DNS 模式 \){NC}"
     read -p "请输入 Cloudflare API Token: " CF_TOKEN
-    read -p "请输入邮箱 (用于证书通知): " MY_EMAIL
-    
+    read -p "请输入邮箱: " MY_EMAIL
     sed -i "s|email admin@example.com|email $MY_EMAIL|" /opt/emby-proxy/Caddyfile
     cat <<EOF >> /opt/emby-proxy/Caddyfile
 
@@ -102,23 +110,21 @@ if [ "$AUTH_MODE" == "2" ]; then
 EOF
     echo "CF_API_TOKEN=$CF_TOKEN" > /opt/emby-proxy/caddy.env
 else
-    echo -e "\( {YELLOW}>>> 已选择 HTTP Standalone 模式 \){NC}"
-    read -p "请输入邮箱 (用于证书通知): " MY_EMAIL
+    echo -e "\( {YELLOW}>>> HTTP Standalone 模式 \){NC}"
+    read -p "请输入邮箱: " MY_EMAIL
     sed -i "s|email admin@example.com|email $MY_EMAIL|" /opt/emby-proxy/Caddyfile
 fi
 
-# 6. 创建 Systemd 服务
+# 5. 创建服务文件
 cat <<SVC_EOF > /etc/systemd/system/emby-backend.service
 [Unit]
 Description=Emby Proxy Backend
 After=network.target
-
 [Service]
 WorkingDirectory=/opt/emby-proxy
 ExecStart=/opt/emby-proxy/emby-proxy
 Restart=always
 RestartSec=5
-
 [Install]
 WantedBy=multi-user.target
 SVC_EOF
@@ -127,40 +133,34 @@ cat <<SVC_EOF > /etc/systemd/system/caddy-proxy.service
 [Unit]
 Description=Caddy SSL Frontend
 After=network.target
-
 [Service]
 WorkingDirectory=/opt/emby-proxy
 EnvironmentFile=-/opt/emby-proxy/caddy.env
 ExecStart=/opt/emby-proxy/caddy run --config /opt/emby-proxy/Caddyfile --adapter caddyfile
 Restart=always
 RestartSec=5
-
 [Install]
 WantedBy=multi-user.target
 SVC_EOF
 
-# 7. 自动赋权 + 清理残余源码（可选）
+# 6. 赋权 + 可选清理
 chmod +x /opt/emby-proxy/emby-proxy /opt/emby-proxy/caddy
 
-read -p "是否清理编译时的源码目录（节省空间）？(y/n，默认 y): " clean
+read -p "是否清理编译源码目录（推荐，节省空间）？(y/n，默认 y): " clean
 if [[ "$clean" != "n" && "$clean" != "N" ]]; then
     rm -rf /opt/emby-reverse-proxy-go
     echo -e "\( {GREEN}>>> 源码已清理 \){NC}"
 fi
 
-# 8. 启动服务
+# 7. 启动服务
 systemctl daemon-reload
 systemctl enable --now emby-backend caddy-proxy
 
 echo -e "\n\( {GREEN}🎉 部署完成！ \){NC}"
-echo -e "访问地址 → https://$DOMAIN:$EX_PORT"
-echo -e "\n\( {YELLOW}常用命令： \){NC}"
-echo -e "  查看日志     : journalctl -u caddy-proxy -f"
-echo -e "  重启服务     : systemctl restart emby-backend caddy-proxy"
-echo -e "  一键卸载     : bash $0 uninstall"
-echo -e "  Caddy 状态   : systemctl status caddy-proxy"
+echo -e "访问地址: https://$DOMAIN:$EX_PORT"
+echo -e "\n常用命令："
+echo -e "  查看日志: journalctl -u caddy-proxy -f"
+echo -e "  重启服务: systemctl restart emby-backend caddy-proxy"
+echo -e "  一键卸载: ./deploy.sh uninstall"
 
-# 首次启动建议查看日志
-echo -e "\n\( {YELLOW}正在显示 Caddy 启动日志（按 Ctrl+C 退出）... \){NC}"
-sleep 2
-journalctl -u caddy-proxy -n 30 -f
+journalctl -u caddy-proxy -n 40 -f
