@@ -9,6 +9,7 @@ MAP_CONF="/etc/nginx/conf.d/emby_maps.conf"
 NOT_FOUND_HTML="/etc/nginx/emby-404.html"
 ACME="$HOME/.acme.sh/acme.sh"
 LOG_FILE="/var/log/emby-proxy.log"
+SERVICE_FILE="/etc/systemd/system/emby-proxy.service"
 
 # --- 颜色 ---
 RED='\033[0;31m'
@@ -30,7 +31,6 @@ init_env() {
     echo -e "${YELLOW}正在下载 emby-404.html... ${NC}"
     curl -sLo "$NOT_FOUND_HTML" "$REPO_RAW_URL/emby-404.html"
 
-    # 简化 UA 白名单（按你的要求）
     cat > "$MAP_CONF" << 'EOF'
 map $http_upgrade $connection_upgrade { default upgrade; '' close; }
 map $http_user_agent $is_emby_client {
@@ -54,18 +54,16 @@ check_cert() {
     fi
 }
 
-# --- [2] 证书申请（加强 acme.sh 处理，解决重装系统后报错）---
+# --- [2] 证书申请 ---
 apply_cert() {
     local D=$1
 
-    # 加强 acme.sh 安装和环境加载（解决 No such file or directory）
     if [[ ! -f "$ACME" ]]; then
         echo -e "\( {YELLOW}acme.sh 未检测到，正在重新安装... \){NC}"
         curl https://get.acme.sh | sh -s email="admin@example.com" --force
         sleep 2
     fi
 
-    # 强制加载 acme.sh 环境
     if [[ -f "$HOME/.acme.sh/acme.sh.env" ]]; then
         source "$HOME/.acme.sh/acme.sh.env" 2>/dev/null || true
     fi
@@ -95,7 +93,7 @@ apply_cert() {
     echo -e "\( {GREEN}证书申请/安装完成！ \){NC}"
 }
 
-# --- [3] Nginx 部署 ---
+# --- [3] Nginx 部署（仅在此处新增 systemd 自启动服务）---
 deploy_nginx() {
     local TYPE=$1; local D=$2
     local CONF="/etc/nginx/conf.d/emby_\( {TYPE}_ \){D}.conf"
@@ -141,7 +139,6 @@ EOF
 }
 EOF
     else
-        # 单站互动式多 Emby 服务
         echo -e "\( {CYAN}=== 单站多 Emby 服务配置（互动模式）=== \){NC}"
         echo "请逐个添加 Emby 服务，输入空路径前缀时结束。"
 
@@ -195,10 +192,37 @@ EOF
     sed "s|__DOMAIN__|$D|g" "$CONF.tmp" > "$CONF"
     rm -f "$CONF.tmp"
 
+    # 启动 emby-proxy（如果未运行）
     if ! pgrep -f emby-proxy >/dev/null; then
         echo -e "\( {YELLOW}正在启动 emby-proxy... \){NC}"
         nohup "$PROXY_BIN" > "$LOG_FILE" 2>&1 &
         echo -e "\( {GREEN}emby-proxy 已启动。 \){NC}"
+    fi
+
+    # === 新增：创建 systemd 自启动服务 ===
+    if [[ ! -f "$SERVICE_FILE" ]]; then
+        echo -e "\( {YELLOW}正在创建 emby-proxy systemd 自启动服务... \){NC}"
+        cat > "$SERVICE_FILE" << EOF
+[Unit]
+Description=Emby Reverse Proxy Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$PROXY_BIN
+WorkingDirectory=/usr/local/bin
+Restart=always
+RestartSec=5
+User=root
+StandardOutput=append:$LOG_FILE
+StandardError=append:$LOG_FILE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable --now emby-proxy.service
+        echo -e "\( {GREEN}emby-proxy 已设置为开机自启动。 \){NC}"
     fi
 
     if nginx -t; then
@@ -242,7 +266,7 @@ manage_config() {
 # --- 菜单 ---
 while true; do
     clear
-    echo -e "\( {CYAN}--- NAT Pro Manager V5 (重装系统优化版) --- \){NC}"
+    echo -e "\( {CYAN}--- NAT Pro Manager V5 (已集成 systemd 自启动) --- \){NC}"
     echo "1) 环境初始化"
     echo "2) 申请/重签证书"
     echo "3) 部署 [万能反代]"
@@ -263,9 +287,14 @@ while true; do
             ;;
         5) manage_config ;;
         6) 
+            echo -e "\( {RED}正在彻底卸载... \){NC}"
             rm -rf "$SSL_DIR" "$PROXY_BIN" "$NOT_FOUND_HTML"
             rm -f /etc/nginx/conf.d/emby_*.conf
+            systemctl stop emby-proxy.service 2>/dev/null || true
+            systemctl disable emby-proxy.service 2>/dev/null || true
+            rm -f "$SERVICE_FILE"
             pkill -f emby-proxy || true
+            systemctl daemon-reload
             systemctl restart nginx
             echo -e "\( {GREEN}卸载完成。 \){NC}"
             ;;
