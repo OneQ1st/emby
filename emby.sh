@@ -93,7 +93,7 @@ apply_cert() {
     echo -e "\( {GREEN}证书申请/安装完成！ \){NC}"
 }
 
-# --- [3] Nginx 部署（仅增加 40889 监听，其他代码完全不动）---
+# --- [3] Nginx 部署（单站和万能都加上 Authorization 头传递）---
 deploy_nginx() {
     local TYPE=$1; local D=$2
     local CONF="/etc/nginx/conf.d/emby_\( {TYPE}_ \){D}.conf"
@@ -101,7 +101,7 @@ deploy_nginx() {
     cat > "$CONF.tmp" << 'EOF'
 server {
     listen 443 ssl http2;
-    listen 40889 ssl http2;     # 运营商外部映射端口（40889）
+    listen 40889 ssl http2;
     server_name __DOMAIN__;
     ssl_certificate /etc/nginx/ssl/__DOMAIN__/fullchain.pem;
     ssl_certificate_key /etc/nginx/ssl/__DOMAIN__/privkey.pem;
@@ -125,9 +125,7 @@ EOF
         cat >> "$CONF.tmp" << 'EOF'
 
     location / {
-        # 原项目要求配置
         proxy_pass http://127.0.0.1:8080;
-
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_max_temp_file_size 0;
@@ -140,17 +138,21 @@ EOF
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
+
+        # 传递 Basic Auth 头（解决 401 Unauthorized）
+        proxy_set_header Authorization $http_authorization;
     }
 }
 EOF
     else
+        # 单站反代 - 互动式多 Emby 服务
         echo -e "\( {CYAN}=== 单站多 Emby 服务配置（互动模式）=== \){NC}"
         echo "请逐个添加 Emby 服务，输入空路径前缀时结束。"
 
         local count=1
         while true; do
             echo -e "\n${YELLOW}第 \( {count} 个 Emby 服务 \){NC}"
-            read -p "路径前缀 (例如 /emby1，直接回车结束): " PREFIX
+            read -p "路径前缀 (例如 /emby1 或 /media，直接回车结束): " PREFIX
             [[ -z "$PREFIX" ]] && break
             [[ "${PREFIX:0:1}" != "/" ]] && PREFIX="/$PREFIX"
 
@@ -189,6 +191,9 @@ EOF
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
+
+        # 传递 Basic Auth 头（解决 401 Unauthorized）
+        proxy_set_header Authorization $http_authorization;
     }
 }
 EOF
@@ -203,7 +208,7 @@ EOF
         echo -e "\( {GREEN}emby-proxy 已启动。 \){NC}"
     fi
 
-    # systemd 自启动
+    # systemd 自启动服务
     if [[ ! -f "$SERVICE_FILE" ]]; then
         cat > "$SERVICE_FILE" << EOF
 [Unit]
@@ -231,10 +236,7 @@ EOF
     if nginx -t; then
         systemctl restart nginx
         echo -e "\( {GREEN}部署成功！ \){NC}"
-        echo -e "=== 客户端正确访问方式 ==="
-        echo -e "地址: auto2.oneq1st.dpdns.org"
-        echo -e "端口: 40889"
-        echo -e "完整示例: https://auto2.oneq1st.dpdns.org:40889/https/ask.ash.yt/443/web/index.html"
+        echo -e "客户端请使用端口 40889"
     else
         echo -e "\( {RED}Nginx 配置测试失败！ \){NC}"
         rm -f "$CONF"
@@ -242,7 +244,7 @@ EOF
     fi
 }
 
-# --- 配置管理（保持不变）---
+# --- 配置管理 ---
 manage_config() {
     echo -e "\( {CYAN}=== 当前 emby 配置 === \){NC}"
     ls /etc/nginx/conf.d/emby_*.conf 2>/dev/null || echo "暂无配置"
@@ -273,7 +275,7 @@ manage_config() {
 # --- 菜单 ---
 while true; do
     clear
-    echo -e "\( {CYAN}--- NAT Pro Manager V5 (已支持 40889 外部端口) --- \){NC}"
+    echo -e "\( {CYAN}--- NAT Pro Manager V5 (单站也添加 Authorization 头) --- \){NC}"
     echo "1) 环境初始化"
     echo "2) 申请/重签证书"
     echo "3) 部署 [万能反代]"
