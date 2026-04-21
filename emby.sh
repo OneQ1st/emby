@@ -36,7 +36,7 @@ init_env() {
 map $http_upgrade $connection_upgrade { default upgrade; '' close; }
 map $http_user_agent $is_emby_client {
     default 0;
-    "~*(Hills|yamby|Afuse|Capy|Fileball|Infuse|SenPlayer|)" 1;
+    "~*(Hills|yamby|Afuse|Capy|Fileball|Infuse|SenPlayer)" 1;
 }
 EOF
     echo -e "\( {GREEN}环境初始化完成。 \){NC}"
