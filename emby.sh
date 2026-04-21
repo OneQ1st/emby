@@ -17,7 +17,7 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# --- [1] 初始化环境（已简化 UA 白名单）---
+# --- [1] 初始化环境 ---
 init_env() {
     echo -e "${CYAN}正在初始化环境并下载 emby-proxy 二进制... ${NC}"
     apt update && apt install -y nginx-full curl openssl socat psmisc lsof cron wget ca-certificates
@@ -39,7 +39,7 @@ map $http_user_agent $is_emby_client {
 }
 EOF
 
-    echo -e "${GREEN}环境初始化完成（UA 白名单已简化）。 ${NC}"
+    echo -e "${GREEN}环境初始化完成。 ${NC}"
 }
 
 # --- 检查证书 ---
@@ -54,9 +54,23 @@ check_cert() {
     fi
 }
 
-# --- [2] 证书申请 ---
+# --- [2] 证书申请（加强 acme.sh 处理，解决重装系统后报错）---
 apply_cert() {
     local D=$1
+
+    # 加强 acme.sh 安装和环境加载（解决 No such file or directory）
+    if [[ ! -f "$ACME" ]]; then
+        echo -e "\( {YELLOW}acme.sh 未检测到，正在重新安装... \){NC}"
+        curl https://get.acme.sh | sh -s email="admin@example.com" --force
+        sleep 2
+    fi
+
+    # 强制加载 acme.sh 环境
+    if [[ -f "$HOME/.acme.sh/acme.sh.env" ]]; then
+        source "$HOME/.acme.sh/acme.sh.env" 2>/dev/null || true
+    fi
+    export PATH="$HOME/.acme.sh:$PATH"
+
     echo -e "\( {CYAN}选择证书申请模式: \){NC}"
     echo "1) Cloudflare DNS (推荐)"
     echo "2) HTTP Standalone"
@@ -67,7 +81,7 @@ apply_cert() {
         export CF_Token="$CF_T"
         "$ACME" --issue --dns dns_cf -d "$D" --force
     else
-        read -p "请输入 NAT 80 端口: " P
+        read -p "请输入 NAT 映射到本机的 80 验证端口: " P
         fuser -k "${P:-80}/tcp" || true
         "$ACME" --issue -d "\( D" --standalone --httpport " \){P:-80}" --force
     fi
@@ -77,6 +91,8 @@ apply_cert() {
         --key-file "$SSL_DIR/$D/privkey.pem" \
         --fullchain-file "$SSL_DIR/$D/fullchain.pem" \
         --reloadcmd "systemctl reload nginx"
+
+    echo -e "\( {GREEN}证书申请/安装完成！ \){NC}"
 }
 
 # --- [3] Nginx 部署 ---
@@ -107,22 +123,17 @@ server {
 EOF
 
     if [[ "$TYPE" == "universal" ]]; then
-        # 万能反代
         cat >> "$CONF.tmp" << 'EOF'
 
     location / {
-        # 原项目要求配置
         proxy_pass http://127.0.0.1:8080;
-
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_max_temp_file_size 0;
-
         proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host $http_host;
         proxy_set_header X-Forwarded-Port $server_port;
-        
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -130,7 +141,7 @@ EOF
 }
 EOF
     else
-        # 单站反代 - 互动式多 Emby 服务
+        # 单站互动式多 Emby 服务
         echo -e "\( {CYAN}=== 单站多 Emby 服务配置（互动模式）=== \){NC}"
         echo "请逐个添加 Emby 服务，输入空路径前缀时结束。"
 
@@ -141,11 +152,10 @@ EOF
             [[ -z "$PREFIX" ]] && break
             [[ "${PREFIX:0:1}" != "/" ]] && PREFIX="/$PREFIX"
 
-            read -p "目标后端地址 (例如 https://emby1.example.com 或 http://192.168.1.100:8096): " TARGET
+            read -p "目标后端地址 (例如 https://emby1.example.com): " TARGET
 
             cat >> "$CONF.tmp" << EOF
 
-    # Emby 服务 ${count}: ${PREFIX} → ${TARGET}
     location \~* ^${PREFIX}(/.*)?\$ {
         proxy_pass ${TARGET};
         proxy_buffering off;
@@ -193,7 +203,7 @@ EOF
 
     if nginx -t; then
         systemctl restart nginx
-        echo -e "\( {GREEN}部署/覆盖成功！ \){NC}"
+        echo -e "\( {GREEN}部署成功！ \){NC}"
     else
         echo -e "\( {RED}Nginx 配置测试失败！ \){NC}"
         rm -f "$CONF"
@@ -201,50 +211,43 @@ EOF
     fi
 }
 
-# --- [5] 配置管理（支持万能和单站的覆盖删除）---
+# --- 配置管理 ---
 manage_config() {
-    echo -e "\( {CYAN}=== 当前已部署的 emby 配置 === \){NC}"
+    echo -e "\( {CYAN}=== 当前 emby 配置 === \){NC}"
     ls /etc/nginx/conf.d/emby_*.conf 2>/dev/null || echo "暂无配置"
 
-    echo -e "\n请选择操作："
-    echo "1) 删除指定域名配置"
-    echo "2) 添加/修改/覆盖域名配置"
-    echo "3) 返回主菜单"
-    read -p "指令: " MOPT
+    echo -e "\n1) 删除指定域名配置"
+    echo "2) 添加/修改/覆盖域名"
+    echo "3) 返回"
+    read -p "选择: " MOPT
 
     case $MOPT in
         1)
-            read -p "请输入要删除的域名: " DEL_D
+            read -p "输入要删除的域名: " DEL_D
             rm -f /etc/nginx/conf.d/emby_*_"$DEL_D".conf
-            echo -e "${GREEN}已删除域名 \( DEL_D 的所有配置。 \){NC}"
+            echo -e "\( {GREEN}已删除。 \){NC}"
             ;;
         2)
-            read -p "请输入要添加/修改/覆盖的域名: " D
+            read -p "输入域名: " D
             if check_cert "$D"; then
-                echo "选择类型："
-                echo "1) 万能反代（通用反代）"
-                echo "2) 单站反代（互动式多 Emby 服务）"
-                read -p "输入 1 或 2: " T
-                if [[ "$T" == "1" ]]; then
-                    deploy_nginx "universal" "$D"
-                else
-                    deploy_nginx "single" "$D"
-                fi
+                echo "1) 万能反代"
+                echo "2) 单站反代（互动式）"
+                read -p "选择: " T
+                [[ "$T" == "1" ]] && deploy_nginx "universal" "$D" || deploy_nginx "single" "$D"
             fi
             ;;
-        *) return ;;
     esac
 }
 
 # --- 菜单 ---
 while true; do
     clear
-    echo -e "\( {CYAN}--- NAT Pro Manager V5 (万能反代也支持覆盖删除) --- \){NC}"
+    echo -e "\( {CYAN}--- NAT Pro Manager V5 (重装系统优化版) --- \){NC}"
     echo "1) 环境初始化"
     echo "2) 申请/重签证书"
     echo "3) 部署 [万能反代]"
     echo "4) 部署 [单站反代]（互动式多 Emby 服务）"
-    echo "5) 配置管理（添加/修改/覆盖/删除域名）"
+    echo "5) 配置管理（添加/修改/覆盖/删除）"
     echo "6) 彻底卸载"
     read -p "指令: " OPT
     case $OPT in
@@ -252,15 +255,11 @@ while true; do
         2) read -p "域名: " D; apply_cert "$D" ;;
         3) 
             D="auto2.oneq1st.dpdns.org"
-            if check_cert "$D"; then
-                deploy_nginx "universal" "$D"
-            fi
+            if check_cert "$D"; then deploy_nginx "universal" "$D"; fi
             ;;
         4) 
             read -p "单站反代域名: " D
-            if check_cert "$D"; then
-                deploy_nginx "single" "$D"
-            fi
+            if check_cert "$D"; then deploy_nginx "single" "$D"; fi
             ;;
         5) manage_config ;;
         6) 
