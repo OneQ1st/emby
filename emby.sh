@@ -1,4 +1,4 @@
-cat > emby.sh << 'EOF'
+cat > /root/emby.sh << 'END_OF_SCRIPT'
 #!/bin/bash
 set -e
 
@@ -55,16 +55,14 @@ check_cert() {
     fi
 }
 
-# --- [2] 证书申请（加强版）---
+# --- [2] 证书申请 ---
 apply_cert() {
     local D=$1
-
     if [[ ! -f "$ACME" ]]; then
         echo -e "\( {YELLOW}正在安装 acme.sh... \){NC}"
         curl https://get.acme.sh | sh -s email="admin@example.com" --force
         sleep 2
     fi
-
     if [[ -f "$HOME/.acme.sh/acme.sh.env" ]]; then
         source "$HOME/.acme.sh/acme.sh.env" 2>/dev/null || true
     fi
@@ -94,7 +92,7 @@ apply_cert() {
     echo -e "\( {GREEN}证书安装完成！ \){NC}"
 }
 
-# --- [3] Nginx 部署（最终版）---
+# --- [3] Nginx 部署（最终修复版）---
 deploy_nginx() {
     local TYPE=$1; local D=$2
     local CONF="/etc/nginx/conf.d/emby_\( {TYPE}_ \){D}.conf"
@@ -203,35 +201,12 @@ EOF
 
     if ! pgrep -f emby-proxy >/dev/null; then
         nohup "$PROXY_BIN" > "$LOG_FILE" 2>&1 &
-        echo -e "\( {GREEN}emby-proxy 已启动。 \){NC}"
-    fi
-
-    if [[ ! -f "$SERVICE_FILE" ]]; then
-        cat > "$SERVICE_FILE" << EOF
-[Unit]
-Description=Emby Reverse Proxy
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=$PROXY_BIN
-Restart=always
-RestartSec=5
-StandardOutput=append:$LOG_FILE
-StandardError=append:$LOG_FILE
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reload
-        systemctl enable --now emby-proxy.service
-        echo -e "\( {GREEN}自启动服务已启用。 \){NC}"
     fi
 
     if nginx -t; then
         systemctl restart nginx
         echo -e "\( {GREEN}部署成功！ \){NC}"
-        echo -e "使用地址: https://$D:40889"
+        echo -e "客户端使用端口: 40889"
     else
         echo -e "\( {RED}Nginx 配置测试失败！ \){NC}"
         rm -f "$CONF"
@@ -239,65 +214,34 @@ EOF
     fi
 }
 
-# --- 配置管理 ---
-manage_config() {
-    echo -e "\( {CYAN}=== 当前配置 === \){NC}"
-    ls /etc/nginx/conf.d/emby_*.conf 2>/dev/null || echo "暂无"
-
-    echo -e "\n1) 删除域名"
-    echo "2) 添加/覆盖域名"
-    echo "3) 返回"
-    read -p "选择: " MOPT
-
-    case $MOPT in
-        1)
-            read -p "输入域名: " DEL_D
-            rm -f /etc/nginx/conf.d/emby_*_"$DEL_D".conf
-            echo -e "\( {GREEN}已删除。 \){NC}"
-            ;;
-        2)
-            read -p "输入域名: " D
-            if check_cert "$D"; then
-                echo "1) 万能反代"
-                echo "2) 单站反代"
-                read -p "选择: " T
-                [[ "$T" == "1" ]] && deploy_nginx "universal" "$D" || deploy_nginx "single" "$D"
-            fi
-            ;;
-    esac
-}
-
 # --- 菜单 ---
 while true; do
     clear
-    echo -e "\( {CYAN}--- NAT Pro Manager V5 (最终版) --- \){NC}"
+    echo -e "\( {CYAN}--- NAT Pro Manager V5 --- \){NC}"
     echo "1) 环境初始化"
     echo "2) 申请/重签证书"
     echo "3) 部署 [万能反代]"
     echo "4) 部署 [单站反代]"
-    echo "5) 配置管理"
-    echo "6) 彻底卸载"
+    echo "5) 退出"
     read -p "指令: " OPT
     case $OPT in
         1) init_env ;;
         2) read -p "域名: " D; apply_cert "$D" ;;
-        3) D="auto2.oneq1st.dpdns.org"; check_cert "$D" && deploy_nginx "universal" "$D" ;;
-        4) read -p "单站域名: " D; check_cert "$D" && deploy_nginx "single" "$D" ;;
-        5) manage_config ;;
-        6) 
-            rm -rf "$SSL_DIR" "$PROXY_BIN" "$NOT_FOUND_HTML"
-            rm -f /etc/nginx/conf.d/emby_*.conf
-            systemctl stop emby-proxy.service 2>/dev/null || true
-            systemctl disable emby-proxy.service 2>/dev/null || true
-            rm -f "$SERVICE_FILE"
-            pkill -f emby-proxy || true
-            systemctl restart nginx
-            echo -e "\( {GREEN}卸载完成。 \){NC}"
+        3) 
+            D="auto2.oneq1st.dpdns.org"
+            if check_cert "$D"; then deploy_nginx "universal" "$D"; fi
             ;;
-        *) exit 0 ;;
+        4) 
+            read -p "单站域名: " D
+            if check_cert "$D"; then deploy_nginx "single" "$D"; fi
+            ;;
+        5) exit 0 ;;
+        *) echo "无效选项" ;;
     esac
     read -p "回车继续..."
 done
-EOF
+END_OF_SCRIPT
 
-chmod +x emby.sh
+chmod +x /root/emby.sh
+echo -e "\033[0;32m脚本已生成！现在执行：\033[0m"
+echo -e "\033[0;36m./emby.sh\033[0m"
