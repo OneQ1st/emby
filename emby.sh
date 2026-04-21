@@ -181,6 +181,10 @@ server {
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
         tcp_nodelay on;
+      #  proxy_set_header Host \$http_host;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Host \$http_host;
+    proxy_set_header X-Forwarded-Port \$server_port;
     }
     location / { return 404; }
 }
