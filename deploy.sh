@@ -2,7 +2,7 @@
 
 # ==================== Emby-Proxy 一键部署脚本 ====================
 # GitHub: https://github.com/OneQ1st/emby
-# 最终稳定版 - 自动检测架构 + 可靠下载
+# 最终稳定版 - 使用固定版本直链下载 Caddy
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -54,32 +54,39 @@ mkdir -p /opt/emby-proxy
 
 # ====================== 下载 emby-proxy ======================
 echo -e "\( {YELLOW}>>> 正在下载 emby-proxy... \){NC}"
-wget -q https://github.com/OneQ1st/emby/raw/main/emby-proxy -O /opt/emby-proxy/emby-proxy || echo -e "\( {RED}emby-proxy 下载失败 \){NC}"
+wget -q https://github.com/OneQ1st/emby/raw/main/emby-proxy -O /opt/emby-proxy/emby-proxy
 chmod +x /opt/emby-proxy/emby-proxy
 
 if [ ! -x "/opt/emby-proxy/emby-proxy" ]; then
-    echo -e "\( {RED}❌ emby-proxy 下载失败！请确认仓库中已上传 emby-proxy 文件 \){NC}"
+    echo -e "\( {RED}❌ emby-proxy 下载失败！请确认仓库中已上传正确的 emby-proxy 文件 \){NC}"
     exit 1
 fi
 echo -e "\( {GREEN}>>> emby-proxy 下载完成 \){NC}"
 
-# ====================== 下载 Caddy (使用稳定直链) ======================
+# ====================== 下载 Caddy（使用固定稳定直链 + 备用） ======================
 echo -e "\( {YELLOW}>>> 正在下载官方 Caddy ( \){CADDY_ARCH})...${NC}"
 cd /opt/emby-proxy
-wget -q --show-progress https://github.com/caddyserver/caddy/releases/latest/download/caddy_linux_${CADDY_ARCH}.tar.gz -O caddy.tar.gz
 
-if [ ! -s "caddy.tar.gz" ]; then
-    echo -e "\( {RED}❌ 下载失败，正在尝试备用方式... \){NC}"
-    wget -q --show-progress https://github.com/caddyserver/caddy/releases/download/v2.11.2/caddy_2.11.2_linux_${CADDY_ARCH}.tar.gz -O caddy.tar.gz
+# 主下载链接（v2.11.2）
+wget -q --show-progress https://github.com/caddyserver/caddy/releases/download/v2.11.2/caddy_2.11.2_linux_${CADDY_ARCH}.tar.gz -O caddy.tar.gz
+
+# 如果主链接失败，尝试备用方式
+if [ ! -s "caddy.tar.gz" ] || [ $(stat -c %s caddy.tar.gz) -lt 1000000 ]; then
+    echo -e "\( {YELLOW}主下载失败，尝试备用下载方式... \){NC}"
+    wget -q --show-progress https://caddyserver.com/api/download?os=linux&arch=${CADDY_ARCH} -O caddy.tar.gz
 fi
 
+# 解压
 tar -xzf caddy.tar.gz caddy 2>/dev/null || true
 rm -f caddy.tar.gz
 
 if [ ! -x "caddy" ]; then
     echo -e "\( {RED}❌ Caddy 下载/解压失败！ \){NC}"
+    echo -e "请手动执行下面命令重试："
+    echo -e "cd /opt/emby-proxy && wget https://github.com/caddyserver/caddy/releases/download/v2.11.2/caddy_2.11.2_linux_${CADDY_ARCH}.tar.gz -O caddy.tar.gz && tar -xzf caddy.tar.gz caddy"
     exit 1
 fi
+
 echo -e "\( {GREEN}>>> Caddy 下载完成 \){NC}"
 
 # ====================== 参数收集 ======================
