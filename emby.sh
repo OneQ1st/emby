@@ -90,7 +90,6 @@ if [ "$MAIN_CHOICE" == "2" ]; then
     echo -e "\n${BLUE}${BOLD}▶ 正在清理系统服务...${NC}"
     echo -e "${BLUE}──────────────────────────────────────────────────${NC}"
     
-    # 停止并禁用服务
     if [ "$INIT_SYSTEM" = "systemd" ]; then
         for svc in emby-backend caddy; do
             if systemctl is-active --quiet "$svc" || systemctl is-enabled --quiet "$svc" 2>/dev/null; then
@@ -117,13 +116,11 @@ if [ "$MAIN_CHOICE" == "2" ]; then
     fi
     echo -e "${GREEN} ✔ 系统服务配置清理完毕。${NC}"
 
-    # 清理程序目录与配置文件
     echo -e "${YELLOW} ℹ 正在删除程序目录与配置文件...${NC}"
     rm -rf /opt/emby-proxy
     rm -rf /etc/caddy
     echo -e "${GREEN} ✔ 部署目录（含数据库、证书、Caddyfile）已彻底删除。${NC}"
 
-    # 解除官方存储库或包
     if [ "$OS_TYPE" = "debian" ] && [ -f "/etc/apt/sources.list.d/caddy-stable.list" ]; then
         read -p " 是否同步卸载 Caddy 的 APT 软件源与主程序？(y/n, 默认 n): " RM_CADDY_APT
         if [[ "$RM_CADDY_APT" =~ ^[Yy](es)?$ ]]; then
@@ -158,7 +155,7 @@ fi
 # ==================================================
 mkdir -p /etc/caddy
 mkdir -p /opt/emby-proxy/ssl
-mkdir -p /opt/emby-proxy/data # 创建数据库存放目录
+mkdir -p /opt/emby-proxy/data
 
 # ==================================================
 # 1. 执行独立的依赖检查与安装块
@@ -238,7 +235,7 @@ if [ "$CADDY_READY" = false ]; then
 fi
 
 # ==================================================
-# 3. 后端 hkfires/EmbyProxy 下载与部署
+# 3. 后端 hkfires/EmbyProxy 下载与部署（带文件名修正）
 # ==================================================
 echo -e "\n${BLUE}${BOLD}▶ [步骤 3/6] 正在检查与部署 hkfires/EmbyProxy 后端...${NC}"
 echo -e "${BLUE}──────────────────────────────────────────────────${NC}"
@@ -258,11 +255,10 @@ if [ -x "$PROXY_EXEC" ]; then
     echo -e "${GREEN} ✔ [已通过] $PROXY_EXEC 已存在且具备执行权限，跳过下载。${NC}"
 else
     echo -e "${YELLOW} ℹ 正在通过 GitHub API 获取最新版本下载链接 (架构: $DL_ARCH)...${NC}"
-    # 获取最新Release的下载直链
     LATEST_URL=$(curl -s https://api.github.com/repos/hkfires/EmbyProxy/releases/latest | grep "browser_download_url.*embyproxy-linux-${DL_ARCH}.tar.gz" | cut -d '"' -f 4)
     
     if [ -z "$LATEST_URL" ]; then
-         echo -e "${YELLOW} ℹ 无法通过API获取链接，尝试拼接默认 Latest 链接...${NC}"
+         echo -e "${YELLOW} ℹ 无法通过 API 获取链接，尝试拼接默认 Latest 链接...${NC}"
          LATEST_URL="https://github.com/hkfires/EmbyProxy/releases/latest/download/embyproxy-linux-${DL_ARCH}.tar.gz"
     fi
 
@@ -270,9 +266,15 @@ else
     wget -qO /tmp/embyproxy.tar.gz "$LATEST_URL"
     if [ $? -eq 0 ]; then
         tar -xzf /tmp/embyproxy.tar.gz -C /opt/emby-proxy/
+        
+        # 修正逻辑：如果解压出来的是带架构后缀的文件 (如 embyproxy-linux-x64)，重命名为 embyproxy
+        if [ -f "/opt/emby-proxy/embyproxy-linux-${DL_ARCH}" ]; then
+            mv "/opt/emby-proxy/embyproxy-linux-${DL_ARCH}" "$PROXY_EXEC"
+        fi
+
         chmod +x "$PROXY_EXEC"
         rm -f /tmp/embyproxy.tar.gz
-        echo -e "${GREEN} ✔ 后端 EmbyProxy 下载并解压授权成功。${NC}"
+        echo -e "${GREEN} ✔ 后端 EmbyProxy 下载并规范化重命名成功。${NC}"
     else
         echo -e "${RED} ✖ [错误] 后端程序下载失败，请检查网络连通性。${NC}"
         exit 1
@@ -295,12 +297,10 @@ if [ -n "$EXISTING_TOKEN" ]; then
     ADMIN_TOKEN="$EXISTING_TOKEN"
     echo -e "${GREEN} ✔ 检测到旧版服务中已有管理密钥，已自动继承保留。${NC}"
 else
-    # 生成长度为 32 字符的纯随机十六进制字符串
     ADMIN_TOKEN=$(openssl rand -hex 16)
     echo -e "${GREEN} ✔ 已生成全新随机安全密钥。${NC}"
 fi
 
-# 写入 .env 文件配置
 cat <<EOF > "$ENV_FILE"
 ADMIN_TOKEN=$ADMIN_TOKEN
 PORT=8787
@@ -444,7 +444,6 @@ echo -e "${BLUE}─────────────────────�
 
 CADDYFILE_PATH="/opt/emby-proxy/Caddyfile"
 
-# 构建通用全局块
 GLOBAL_BLOCK="email $MY_EMAIL\n    http_port $HTTP_PORT\n    https_port $HTTPS_PORT"
 
 if [ "$USE_EXISTING_CERT" = true ]; then
